@@ -28,7 +28,7 @@
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:paddingTop="12dp"
-            android:text="Target: Samsung Galaxy Tab A9+ landscape · keyboard &amp; mouse · extracted classic Data."
+            android:text="Android tablet devices. Landscape, with a keyboard and mouse."
             android:textColor="@color/obs_text_muted"
             android:textSize="14sp" />
 

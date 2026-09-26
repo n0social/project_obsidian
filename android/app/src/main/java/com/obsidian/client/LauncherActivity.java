@@ -239,8 +239,7 @@ public class LauncherActivity extends Activity {
         rotateWoweeLogs();
         clearAuthErrorFile();
         if (signinStatus != null) signinStatus.setVisibility(View.GONE);
-        Log.i(TAG, "Play standing realmlist=" + hostValue + ":" + portValue
-                + " user=" + userValue);
+        Log.i(TAG, "Play standing realmlist=" + hostValue + ":" + portValue);
 
         Intent intent = new Intent(this, MainActivity.class);
         intent.putExtra(MainActivity.EXTRA_AUTO_LOGIN, true);

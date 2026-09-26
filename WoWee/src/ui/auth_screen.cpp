@@ -388,8 +388,7 @@ void AuthScreen::render(auth::AuthHandler& authHandler) {
     // and must not draw ImGui chrome (it looked squished on tablet).
     if (!androidAutoLoginStarted_ && !authenticating && !androidAuthExitRequested_) {
         androidAutoLoginStarted_ = true;
-        LOG_INFO("Android headless auth via native login: ", hostname, ":", port,
-                 " user=", username);
+        LOG_INFO("Android headless auth via native login: ", hostname, ":", port);
         if (std::strlen(username) == 0 || std::strlen(password) == 0 || std::strlen(hostname) == 0) {
             setStatus("Missing account details from Obsidian login screen", true);
         } else {

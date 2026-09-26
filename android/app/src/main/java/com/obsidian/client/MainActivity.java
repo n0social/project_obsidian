@@ -76,8 +76,7 @@ public class MainActivity extends SDLActivity {
                     prefs.getString(ObsidianSettings.KEY_ACCOUNT_PASS, ""), true);
             Os.setenv("OBSIDIAN_NATIVE_LOGIN", autoLogin ? "1" : "0", true);
             Log.i(TAG, "Native login host=" + realmHost
-                    + ":" + prefs.getInt(ObsidianSettings.KEY_REALM_PORT, 3724)
-                    + " user=" + prefs.getString(ObsidianSettings.KEY_ACCOUNT_USER, ""));
+                    + ":" + prefs.getInt(ObsidianSettings.KEY_REALM_PORT, 3724));
 
             // Tablet memory profile: downsample textures + smaller GPU caches.
             // Does not tear meshes — only softens fidelity / draw cost.
