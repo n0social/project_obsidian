@@ -1,4 +1,8 @@
-# Project Obsydian `[Work in Progress]`
+# project_obsidian `[Work in Progress]`
+
+<p align="center">
+  <img src="Project_Obsidian_Logo.png" alt="project_obsidian" width="320">
+</p>
 
 **Started:** July 30, 2026  
 **Status:** Active development — not a finished product.
@@ -12,7 +16,7 @@ Living detail: [STATUS.md](STATUS.md) · remaining work: [TODO.md](TODO.md)
 
 ## Based on WoWee
 
-[WoWee](https://github.com/Kelsidavis/WoWee) is a clean-room C++ WoW client (Vulkan/SDL2) that talks to classic private-server backends. Obsydian does **not** replace WoWee; it ports and wraps that engine for Android.
+[WoWee](https://github.com/Kelsidavis/WoWee) is a clean-room C++ WoW client (Vulkan/SDL2) that talks to classic private-server backends. project_obsidian does **not** replace WoWee; it ports and wraps that engine for Android.
 
 | Item | Choice |
 |------|--------|
@@ -26,7 +30,7 @@ Living detail: [STATUS.md](STATUS.md) · remaining work: [TODO.md](TODO.md)
 
 ```
 PLAYING.md                       tablet steps: install, extract, sign in, enter world
-android/                         Obsydian Android app (SDLActivity + NDK → libwowee.so)
+android/                         project_obsidian Android app (SDLActivity + NDK → libwowee.so)
 scripts/                         setup / build / install / emulator / data-push
 patches/wowee-android-port.patch
 STATUS.md                        have vs should-have (source of truth)

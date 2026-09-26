@@ -39,7 +39,7 @@ android {
             }
         }
 
-        buildConfigField("String", "ENGINE_NAME", "\"Obsidian\"")
+        buildConfigField("String", "ENGINE_NAME", "\"project_obsidian\"")
     }
 
     buildFeatures {

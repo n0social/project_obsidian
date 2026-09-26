@@ -14,5 +14,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "Obsidian"
+rootProject.name = "project_obsidian"
 include(":app")

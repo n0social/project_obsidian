@@ -15,7 +15,7 @@
 
         <TextView
             style="@style/ObsidianSectionSubtitle"
-            android:text="Obsidian supports USB/BT mouse + keyboard. Touch works for menus (realm / character). Relative mouse look is for in-world camera with a mouse." />
+            android:text="project_obsidian supports USB/BT mouse + keyboard. Touch works for menus (realm / character). Relative mouse look is for in-world camera with a mouse." />
 
         <CheckBox
             android:id="@+id/ctrl_relative_mouse"

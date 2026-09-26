@@ -1,6 +1,6 @@
-# Play Obsydian on a tablet
+# Play project_obsidian on a tablet
 
-Obsydian is the step on the tablet between you and a private Vanilla **1.12.1** server. The server stays where you already run it. This app loads your game files, connects to that server, and plays on the tablet.
+project_obsidian is the step on the tablet between you and a private Vanilla **1.12.1** server. The server stays where you already run it. This app loads your game files, connects to that server, and plays on the tablet.
 
 The app ships no Blizzard game files and no built-in realm. You supply your own legally obtained 1.12.1 client, and an account that already exists on your server.
 
@@ -19,7 +19,7 @@ This is an early build. A session can still drop after you enter the world, and 
 
 1. Copy `obsidian-debug.apk` onto the tablet, or download it from this repository in the tablet’s browser.
 2. Open the APK and allow installation from that source if Android asks.
-3. Open **Obsidian**. The first screen is landscape, with a list on the left: Home, Sign in, Graphics, Audio, Controls, Data, About, and **Enter World** at the bottom.
+3. Open **project_obsidian**. The first screen is landscape, with a list on the left: Home, Sign in, Graphics, Audio, Controls, Data, About, and **Enter World** at the bottom.
 
 ## 2. Add your game files
 
@@ -33,7 +33,7 @@ Use this when you have the original 1.12.1 folder and have not unpacked it yet.
 
 1. Tap **Select WoW client folder and extract**.
 2. Choose the folder that contains `Data` and the `.MPQ` archives, or choose the `Data` folder itself.
-3. Leave Obsydian open. Copying the archives comes first, then the built-in extractor unpacks them. A full extract often takes 10–30 minutes.
+3. Leave project_obsidian open. Copying the archives comes first, then the built-in extractor unpacks them. A full extract often takes 10–30 minutes.
 4. Wait until the status says the classic data is ready. **Cancel** stops the job.
 
 ### Import a folder you already unpacked

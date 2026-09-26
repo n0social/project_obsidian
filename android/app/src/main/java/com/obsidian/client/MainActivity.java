@@ -191,7 +191,7 @@ public class MainActivity extends SDLActivity {
         try {
             File readme = new File(data, "README_OBSIDIAN.txt");
             String text =
-                    "Obsidian expects extracted Vanilla 1.12.1 assets here.\n\n"
+                    "project_obsidian expects extracted Vanilla 1.12.1 assets here.\n\n"
                             + "Copy the WoWee extraction output so that ONE of these exists:\n"
                             + "  " + data.getAbsolutePath() + "/manifest.json\n"
                             + "  " + data.getAbsolutePath() + "/expansions/classic/manifest.json\n\n"

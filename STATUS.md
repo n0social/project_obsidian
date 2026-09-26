@@ -1,4 +1,4 @@
-# Obsydian — have vs should-have
+# project_obsidian — have vs should-have
 
 Living status as of 2026-08-11. Planning background lives in `OBSIDIAN_NOTES.md`.
 Remaining work is tracked in `TODO.md`.
@@ -36,7 +36,7 @@ That writes `WoWee/Data/expansions/classic/manifest.json`. Then `.\scripts\push-
 | Vanilla 1.12.1 MPQs | `retro_wow/RetroWoW 1.12.1/Data/` | ~5.3 GB source |
 | Classic extract | `WoWee/Data/expansions/classic/` | `manifest.json`, 79887 files, ~6.3 GB, 0 failed |
 | Manifest policy | `AndroidManifest.xml` | Landscape, cleartext LAN, Vulkan optional, no touchscreen required |
-| Branding | `drawable/obsydian_logo.png` | Launcher mark |
+| Branding | `drawable/obsidian_logo.png` | Launcher mark |
 | Debug APK | `android/app/build/outputs/apk/debug/app-debug.apk` | 22.6 MB, arm64-v8a + x86_64, NDK 30 |
 
 ## Should have (v1) — not done
@@ -58,7 +58,7 @@ That writes `WoWee/Data/expansions/classic/manifest.json`. Then `.\scripts\push-
 ## Doc / tree cleanup done this pass
 
 - Removed unused GLES skeleton (`NativeBridge`, `NativeSurfaceView`, `obsidian_android.cpp`, `renderer_gles.*`, `activity_main.xml`)
-- Added missing `@drawable/obsydian_logo` (manifest previously referenced a file that did not exist)
+- Added missing `@drawable/obsidian_logo` (manifest previously referenced a file that did not exist)
 - Gradle/CMake now resolve `VCPKG_ROOT` from the environment instead of a dead hardcoded path
 - `.gitignore` covers `retro_wow/` and `WoWee/`
 - README / TODO brought in line with the code

@@ -1,4 +1,4 @@
-# Obsidian Android
+# project_obsidian Android
 
 Vanilla 1.12 client shell on [WoWee](https://github.com/Kelsidavis/WoWee), hosted by SDL2 `SDLActivity`.
 

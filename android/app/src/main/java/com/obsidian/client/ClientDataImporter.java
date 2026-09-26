@@ -156,11 +156,11 @@ public final class ClientDataImporter {
                 staging.getAbsolutePath(),
                 dataDirectory(context).getAbsolutePath());
         if (NativeExtract.isAvailable() && nativeMsg == null) {
-            progress.onProgress(95, "Extract finished — applying Obsidian UI overlay…");
+            progress.onProgress(95, "Extract finished — applying project_obsidian UI overlay…");
             ObsidianUiOverlay.apply(context);
             if (hasManifest(dataDirectory(context))) {
                 progress.onProgress(100, "Classic data ready.");
-                return Result.ok("Classic client extracted. Obsidian UI overlay applied.");
+                return Result.ok("Classic client extracted. project_obsidian UI overlay applied.");
             }
             return Result.fail("Extract finished but manifest.json was not found under expansions/classic.");
         }
@@ -276,7 +276,7 @@ public final class ClientDataImporter {
             }
         }
         ObsidianUiOverlay.apply(context);
-        return Result.ok("Classic data imported (" + done + " files). Obsidian UI overlay applied.");
+        return Result.ok("Classic data imported (" + done + " files). project_obsidian UI overlay applied.");
     }
 
     private static void collectFiles(DocumentFile dir, List<DocumentFile> out) {

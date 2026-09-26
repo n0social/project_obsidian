@@ -1,4 +1,4 @@
-Obsidian UI overlay
+project_obsidian UI overlay
 ===================
 
 Files in this APK folder (and in the tablet's files/obsidian_ui/ directory)

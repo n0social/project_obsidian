@@ -2,5 +2,5 @@
 <adaptive-icon xmlns:android="http://schemas.android.com/apk/res/android">
     <!-- Match the medallion, not a white plate. -->
     <background android:drawable="@color/ic_launcher_background" />
-    <foreground android:drawable="@drawable/obsydian_logo" />
+    <foreground android:drawable="@drawable/obsidian_logo" />
 </adaptive-icon>

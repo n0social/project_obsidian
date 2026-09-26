@@ -1,5 +1,5 @@
 <?xml version="1.0" encoding="utf-8"?>
 <!-- Pre-API-26 / non-adaptive fallback: logo bitmap, not a white plate. -->
 <bitmap xmlns:android="http://schemas.android.com/apk/res/android"
-    android:src="@drawable/obsydian_logo"
+    android:src="@drawable/obsidian_logo"
     android:gravity="fill" />
