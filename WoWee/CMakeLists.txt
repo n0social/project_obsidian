@@ -1131,13 +1131,16 @@ else()
 
 # ---- Lua 5.1.5 (vendored, static library) ----
 set(LUA_DIR ${CMAKE_CURRENT_SOURCE_DIR}/extern/lua-5.1.5/src)
+# Tracked replacements for extern files, which setup-wowee.ps1 re-fetches.
+# lvm.c adds Lua 5.0's `for k,v in t do`, which the 1.12 FrameXML relies on.
+set(LUA_PATCH_DIR ${CMAKE_CURRENT_SOURCE_DIR}/patches/lua-5.1.5)
 set(LUA_SOURCES
     ${LUA_DIR}/lapi.c    ${LUA_DIR}/lcode.c   ${LUA_DIR}/ldebug.c
     ${LUA_DIR}/ldo.c     ${LUA_DIR}/ldump.c   ${LUA_DIR}/lfunc.c
     ${LUA_DIR}/lgc.c     ${LUA_DIR}/llex.c    ${LUA_DIR}/lmem.c
     ${LUA_DIR}/lobject.c ${LUA_DIR}/lopcodes.c ${LUA_DIR}/lparser.c
     ${LUA_DIR}/lstate.c  ${LUA_DIR}/lstring.c ${LUA_DIR}/ltable.c
-    ${LUA_DIR}/ltm.c     ${LUA_DIR}/lundump.c ${LUA_DIR}/lvm.c
+    ${LUA_DIR}/ltm.c     ${LUA_DIR}/lundump.c ${LUA_PATCH_DIR}/lvm.c
     ${LUA_DIR}/lzio.c    ${LUA_DIR}/lauxlib.c ${LUA_DIR}/lbaselib.c
     ${LUA_DIR}/ldblib.c  ${LUA_DIR}/liolib.c  ${LUA_DIR}/lmathlib.c
     ${LUA_DIR}/loslib.c  ${LUA_DIR}/ltablib.c ${LUA_DIR}/lstrlib.c
@@ -1148,6 +1151,17 @@ set_target_properties(lua51 PROPERTIES LINKER_LANGUAGE C C_STANDARD 99 POSITION_
 target_include_directories(lua51 PUBLIC ${LUA_DIR})
 if(CMAKE_C_COMPILER_ID MATCHES "GNU|Clang")
     target_compile_options(lua51 PRIVATE -w)
+endif()
+if(OBSIDIAN_ANDROID)
+    # Bionic FORTIFY aborts Lua 5.1 during luaL_newstate / string setup
+    # ("strchr: prevented read past end of buffer") because several internal
+    # buffers are length-counted rather than C strings. The NDK injects
+    # -D_FORTIFY_SOURCE=2; override it for this library only. The forced
+    # include runs before each .c file's own headers, so <string.h> sees
+    # fortify off even when the toolchain flag is applied later.
+    target_compile_options(lua51 PRIVATE
+        -U_FORTIFY_SOURCE -D_FORTIFY_SOURCE=0
+        "SHELL:-include ${LUA_PATCH_DIR}/wowee_nofortify.h")
 endif()
 message(STATUS "Lua: vendored 5.1.5 (set WOWEE_SYSTEM_LUA=ON to link an installed one)")
 

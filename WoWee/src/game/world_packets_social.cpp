@@ -428,9 +428,12 @@ bool QueryTimeResponseParser::parse(network::Packet& packet, QueryTimeResponseDa
 }
 
 network::Packet RequestPlayedTimePacket::build(bool sendToChat) {
+    // 1.12 CMSG_PLAYED_TIME is empty. The chat-trigger byte arrived in a later
+    // client; sending it makes a 1.12 world server report a size mismatch and
+    // drop the rest of the parse.
+    (void)sendToChat;
     network::Packet packet(wireOpcode(Opcode::CMSG_PLAYED_TIME));
-    packet.writeUInt8(sendToChat ? 1 : 0);
-    LOG_DEBUG("Built CMSG_PLAYED_TIME: sendToChat=", sendToChat);
+    LOG_DEBUG("Built CMSG_PLAYED_TIME");
     return packet;
 }
 

@@ -562,10 +562,14 @@ static int lua_GetChatWindowInfo(lua_State* L) {
 
     lua_pushstring(L, "");      // name
     lua_pushnumber(L, 14.0);    // fontSize
-    lua_pushnumber(L, 1.0);     // r
-    lua_pushnumber(L, 1.0);     // g
-    lua_pushnumber(L, 1.0);     // b
-    lua_pushnumber(L, 1.0);     // alpha
+    // Black and transparent, the default layout's colour. FCF_SetWindowColor
+    // and FCF_SetWindowAlpha apply these to the background and every border
+    // texture, and ChatFrameBackground is plain white, so white at full alpha
+    // drew an opaque white slab where the chat window sits.
+    lua_pushnumber(L, 0.0);     // r
+    lua_pushnumber(L, 0.0);     // g
+    lua_pushnumber(L, 0.0);     // b
+    lua_pushnumber(L, 0.0);     // alpha
     // Numbers and nil, not booleans. docked is a dock position, not a flag —
     // FCF_LoadChatSettings hands it straight to FCF_DockFrame as the index to
     // insert at, and that compares it against a count. A boolean there is a

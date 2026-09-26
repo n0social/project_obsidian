@@ -406,7 +406,7 @@ if (ImGui::Button("Restore Gameplay Defaults", ImVec2(-1, 0))) {
     inventoryScreen.setShowKeyring(true);
     pendingBagScale = InventoryScreen::recommendedBagScale(ImGui::GetIO().DisplaySize.y);
     inventoryScreen.setBagScale(pendingBagScale);
-    pendingShowMicroMenu = false;
+    pendingShowMicroMenu = true;
     uiOpacity_ = 0.65f;
     minimapRotate_ = false;
     minimapSquare_ = false;

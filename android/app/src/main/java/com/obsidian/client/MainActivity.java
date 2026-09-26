@@ -75,6 +75,26 @@ public class MainActivity extends SDLActivity {
             Os.setenv("OBSIDIAN_ACCOUNT_PASS",
                     prefs.getString(ObsidianSettings.KEY_ACCOUNT_PASS, ""), true);
             Os.setenv("OBSIDIAN_NATIVE_LOGIN", autoLogin ? "1" : "0", true);
+            // The original 1.12 Interface/FrameXML from the classic extract is
+            // the in-game UI; touch <external files>/framexml_off to fall back to
+            // WoWee's built-in HUD. Both variables must be set or the widget
+            // tree is built and then not drawn.
+            String frameXml = new File(dataDir.getParentFile(), "framexml_off").isFile() ? "0" : "1";
+            Os.setenv("WOWEE_LOAD_FRAMEXML", frameXml, true);
+            Os.setenv("WOWEE_FRAMEXML_UI", frameXml, true);
+            File widgetDump = new File(dataDir.getParentFile(), "widget_dump");
+            if (widgetDump.isFile()) Os.setenv("WOWEE_WIDGET_DUMP", "2", true);
+            File terrainRadius = new File(dataDir.getParentFile(), "terrain_radius");
+            if (terrainRadius.isFile()) {
+                try (java.io.BufferedReader r = new java.io.BufferedReader(
+                        new java.io.FileReader(terrainRadius))) {
+                    String v = r.readLine();
+                    if (v != null && v.trim().matches("[1-8]")) {
+                        Os.setenv("WOWEE_TERRAIN_LOAD_RADIUS", v.trim(), true);
+                    }
+                } catch (java.io.IOException ignored) {
+                }
+            }
             Log.i(TAG, "Native login host=" + realmHost
                     + ":" + prefs.getInt(ObsidianSettings.KEY_REALM_PORT, 3724));
 
@@ -84,10 +104,16 @@ public class MainActivity extends SDLActivity {
             if (maxTex > 0) {
                 Os.setenv("WOWEE_MAX_TEX_DIM", Integer.toString(maxTex), true);
             }
-            Os.setenv("WOWEE_TERRAIN_TEX_CACHE_MB", "256", true);
-            Os.setenv("WOWEE_M2_TEX_CACHE_MB", "256", true);
-            Os.setenv("WOWEE_WMO_TEX_CACHE_MB", "384", true);
-            Os.setenv("WOWEE_CHARACTER_TEX_CACHE_MB", "192", true);
+            // A 4 GB tablet has about 1.2 GB free with the game open. The old
+            // 256/256/384/192 caps plus a 345 MB file cache let lmkd kill the
+            // game mid-session, which the realm saw as a dropped connection.
+            Os.setenv("WOWEE_TERRAIN_TEX_CACHE_MB", "96", true);
+            Os.setenv("WOWEE_M2_TEX_CACHE_MB", "96", true);
+            Os.setenv("WOWEE_WMO_TEX_CACHE_MB", "128", true);
+            Os.setenv("WOWEE_CHARACTER_TEX_CACHE_MB", "64", true);
+            Os.setenv("WOWEE_FILE_CACHE_MB", "128", true);
+            // Each terrain worker holds a whole decoded ADT while it works.
+            Os.setenv("WOWEE_TERRAIN_WORKERS", "2", true);
         } catch (Throwable t) {
             Log.w(TAG, "Failed to setenv", t);
         }

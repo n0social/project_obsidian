@@ -68,6 +68,21 @@ namespace {
     // click from a neighbor. Units are never clamped — this is a GO-only correction, the
     // same reasoning that already makes WMO GOs fall back to a conservative fixed sphere.
 
+    // True when the client's own 1.12 FrameXML is loaded and drawn. Its
+    // PlayerFrame, MainMenuBar, bag slots, micro buttons, XP bar and
+    // QuestWatchFrame then cover the same ground as these ImGui panels, and
+    // drawing both stacks two interfaces on top of each other.
+    bool originalInterfaceActive() {
+        static const bool on = [] {
+            const auto set = [](const char* n) {
+                const char* v = std::getenv(n);
+                return v && *v && std::string(v) != "0";
+            };
+            return set("WOWEE_LOAD_FRAMEXML") && set("WOWEE_FRAMEXML_UI");
+        }();
+        return on;
+    }
+
     bool raySphereIntersect(const wowee::rendering::Ray& ray, const glm::vec3& center, float radius, float& tOut) {
         glm::vec3 oc = ray.origin - center;
         float b = glm::dot(oc, ray.direction);
@@ -451,7 +466,8 @@ void GameScreen::render(game::GameHandler& gameHandler) {
     // Process targeting input before UI windows
     processTargetInput(gameHandler);
 
-    renderPlayerFrame(gameHandler);
+    const bool originalUi = originalInterfaceActive();
+    if (!originalUi) renderPlayerFrame(gameHandler);
 
     // Pet frame (below player frame, only when player has an active pet)
     if (gameHandler.hasPet()) {
@@ -507,21 +523,23 @@ void GameScreen::render(game::GameHandler& gameHandler) {
     }
 
     // ---- New UI elements ----
-    actionBarPanel_.renderActionBar(gameHandler, settingsPanel_, chatPanel_,
-        inventoryScreen, spellbookScreen, questLogScreen,
-        [this](uint32_t id, pipeline::AssetManager* am) { return getSpellIcon(id, am); });
-    actionBarPanel_.renderStanceBar(gameHandler, settingsPanel_, spellbookScreen,
-        [this](uint32_t id, pipeline::AssetManager* am) { return getSpellIcon(id, am); });
-    if (actionBarPanel_.renderBagBar(gameHandler, settingsPanel_, inventoryScreen))
-        saveSettings();
-    renderMicroMenu(gameHandler);
-    actionBarPanel_.renderXpBar(gameHandler, settingsPanel_);
-    actionBarPanel_.renderRepBar(gameHandler, settingsPanel_);
+    if (!originalUi) {
+        actionBarPanel_.renderActionBar(gameHandler, settingsPanel_, chatPanel_,
+            inventoryScreen, spellbookScreen, questLogScreen,
+            [this](uint32_t id, pipeline::AssetManager* am) { return getSpellIcon(id, am); });
+        actionBarPanel_.renderStanceBar(gameHandler, settingsPanel_, spellbookScreen,
+            [this](uint32_t id, pipeline::AssetManager* am) { return getSpellIcon(id, am); });
+        if (actionBarPanel_.renderBagBar(gameHandler, settingsPanel_, inventoryScreen))
+            saveSettings();
+        renderMicroMenu(gameHandler);
+        actionBarPanel_.renderXpBar(gameHandler, settingsPanel_);
+        actionBarPanel_.renderRepBar(gameHandler, settingsPanel_);
+    }
     auto spellIconFn = [this](uint32_t id, pipeline::AssetManager* am) { return getSpellIcon(id, am); };
     combatUI_.renderCastBar(gameHandler, spellIconFn);
     renderMirrorTimers(gameHandler);
     combatUI_.renderCooldownTracker(gameHandler, settingsPanel_, spellIconFn);
-    renderQuestObjectiveTracker(gameHandler);
+    if (!originalUi) renderQuestObjectiveTracker(gameHandler);
     renderNameplates(gameHandler);  // player names always shown; NPC plates gated by showNameplates_
     combatUI_.renderBattlegroundScore(gameHandler);
     combatUI_.renderRaidWarningOverlay(gameHandler);
@@ -919,9 +937,14 @@ void GameScreen::renderMicroMenu(game::GameHandler& gameHandler) {
     if (!settingsPanel_.pendingShowMicroMenu) return;
 
     ImGuiIO& io = ImGui::GetIO();
-    constexpr float buttonSize = 28.0f;
+#ifdef __ANDROID__
+    const float buttonSize = 44.0f;
+#else
+    const float buttonSize = 28.0f;
+#endif
     constexpr float margin = 10.0f;
-    const float y = std::max(8.0f, io.DisplaySize.y - buttonSize - 18.0f);
+    const float actionBarH = 48.0f * settingsPanel_.pendingActionBarScale + 24.0f;
+    const float y = std::max(8.0f, io.DisplaySize.y - actionBarH - buttonSize - 16.0f);
 
     ImGui::SetNextWindowPos(ImVec2(margin, y), ImGuiCond_Always);
     ImGuiWindowFlags flags =

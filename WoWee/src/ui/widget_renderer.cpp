@@ -308,7 +308,7 @@ void WidgetRenderer::render(WidgetTree& tree, float screenW, float screenH) {
     static int framesSeen = 0;
     static bool dumped = false;
     ++framesSeen;
-    if (dumpWidgets && !dumped && framesSeen > 180) {
+    if (dumpWidgets && !dumped && framesSeen > 30) {
         dumped = true;
         // The screen it was laid out against, because a coordinate means
         // nothing without it: 1920 is the middle of one display and off

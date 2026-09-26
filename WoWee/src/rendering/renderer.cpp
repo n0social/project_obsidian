@@ -2749,7 +2749,17 @@ void Renderer::setViewDistance(float distance) {
 
 int Renderer::getTerrainLoadRadius() const {
     constexpr float kAdtTileSize = 533.33333f;
-    return glm::clamp(static_cast<int>(std::ceil(viewDistance_ / kAdtTileSize)) + 1, 2, 6);
+    int maxRadius = 6;
+#ifdef __ANDROID__
+    // Radius 6 keeps up to 13x13 ADTs with their doodads resident, which put
+    // native heap past 1.4 GB on a 4 GB tablet and got the app killed by lmkd.
+    maxRadius = 2;
+#endif
+    if (const char* raw = std::getenv("WOWEE_TERRAIN_LOAD_RADIUS"); raw && *raw) {
+        int forced = std::atoi(raw);
+        if (forced >= 1 && forced <= 8) maxRadius = forced;
+    }
+    return glm::clamp(static_cast<int>(std::ceil(viewDistance_ / kAdtTileSize)) + 1, 1, maxRadius);
 }
 
 bool Renderer::loadTerrainArea(const std::string& mapName, int centerX, int centerY, int radius) {

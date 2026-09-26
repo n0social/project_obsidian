@@ -1000,13 +1000,9 @@ void GameScreen::renderTargetFrame(game::GameHandler& gameHandler) {
     auto* window = services_.window;
     float screenW = window ? static_cast<float>(window->getWidth()) : 1280.0f;
 
-    // The frame auto-sizes (AlwaysAutoResize) to its widest content, so long names,
-    // subtitles, guild tags, and the level/classification line all fit without
-    // clipping. A 250px floor keeps the default look; the health/power bars use -1
-    // width so they fill whatever the frame grows to. Centering uses last frame's
-    // measured width since the position is set before the window lays out.
-    float frameW = lastTargetFrameWidth_;
-    float frameX = (screenW - frameW) / 2.0f;
+    // Classic default: player frame is top-left, target frame sits beside it.
+    float frameW = 200.0f;
+    float frameX = 270.0f;
 
     ImGui::SetNextWindowPos(ImVec2(frameX, 30.0f), ImGuiCond_Always);
     ImGui::SetNextWindowSizeConstraints(ImVec2(250.0f, 0.0f),

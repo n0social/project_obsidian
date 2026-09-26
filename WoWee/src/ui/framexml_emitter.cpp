@@ -111,6 +111,35 @@ std::string scriptSignature(const std::string& script) {
     return scriptParameters(script) + ", ...";
 }
 
+/// Statements that publish the 1.12 handler globals. `this` is never a
+/// parameter, so a plain assignment reaches the global. OnEvent's arg1 is a
+/// parameter, so it has to be copied onto _G or a function the body calls
+/// still sees the global as nil.
+std::string scriptGlobalPreamble(const std::string& script) {
+    std::string p = "this = self; ";
+    if (script == "OnUpdate") {
+        p += "arg1 = elapsed; ";
+    } else if (script == "OnClick" || script == "OnDoubleClick" ||
+               script == "OnMouseDown" || script == "OnMouseUp" ||
+               script == "OnDragStart" || script == "OnDragStop" ||
+               script == "OnReceiveDrag") {
+        p += "arg1 = button; ";
+    } else if (script == "OnValueChanged") {
+        p += "arg1 = value; ";
+    } else if (script == "OnChar") {
+        p += "arg1 = text; ";
+    } else if (script == "OnMouseWheel") {
+        p += "arg1 = delta; ";
+    } else if (script == "OnVerticalScroll" || script == "OnHorizontalScroll") {
+        p += "arg1 = offset; ";
+    } else if (script == "OnEvent") {
+        p += "_G.event = event; _G.arg1 = arg1; _G.arg2 = arg2; _G.arg3 = arg3; "
+             "_G.arg4 = arg4; _G.arg5 = arg5; _G.arg6 = arg6; _G.arg7 = arg7; "
+             "_G.arg8 = arg8; _G.arg9 = arg9; ";
+    }
+    return p;
+}
+
 struct Emitter {
     EmitResult result;
     int temp = 0;
@@ -164,8 +193,14 @@ struct Emitter {
             // left those names nil, so every one of these bodies failed the
             // moment it touched its own argument — arithmetic on a nil elapsed
             // being the loudest of them.
+            // 1.12 scripts read the frame as the global `this`, and the first
+            // handler argument as the global `arg1`. The names in the parameter
+            // list only cover a body that uses those names directly. A body
+            // that calls WorldStateAlwaysUpFrame_OnLoad() or
+            // ExhaustionTick_OnUpdate(arg1) is talking to the globals.
             line(var + ":SetScript(" + quote(s.name) +
-                 ", function(" + scriptSignature(s.name) + ") " + body + " end)");
+                 ", function(" + scriptSignature(s.name) + ") " +
+                 scriptGlobalPreamble(s.name) + body + " end)");
         }
     }
 
@@ -202,7 +237,12 @@ struct Emitter {
         if (const std::string* inh = node.attr("inherits")) {
             if (!isTexture) line(var + ":SetFontObject(" + quote(*inh) + ")");
         }
-        if (node.attrBool("setAllPoints")) {
+        // A texture given neither a size nor anchors fills its parent in the
+        // real client. PlayerFrameTexture, the portrait ring and plate, is
+        // declared exactly that way and otherwise laid out at 0x0.
+        const bool fillsParent = node.attrBool("setAllPoints") ||
+            (isTexture && !node.child("Size") && !node.child("Anchors"));
+        if (fillsParent) {
             line(var + ":SetAllPoints(" + parentVar + ")");
         }
         if (node.attrBool("hidden")) line(var + ":Hide()");
@@ -404,6 +444,7 @@ struct Emitter {
             inner.emitFrameBody(node, "self", name, "self:GetParent()",
                                 std::string(), /*fireOnLoad=*/false);
             line("__WoweeTemplates[" + quote(name) + "] = function(self)");
+            line("this = self");
             line("local __w = {}");
             // A template can itself inherit one, and this branch used to return
             // before that was ever emitted — so InterfaceOptionsListButtonTemplate
@@ -565,6 +606,19 @@ struct Emitter {
         // Before Frames and Scripts, so a child anchoring to $parentNormalTexture
         // and an OnLoad reading its own label both find something there.
         emitButtonRegions(node, var, name);
+        // A StatusBar's fill. Without it every health, mana and XP bar in
+        // FrameXML has a value and nothing to draw it with.
+        if (const XmlNode* bar = node.child("BarTexture")) {
+            if (const std::string* file = bar->attr("file"))
+                line(var + ":SetStatusBarTexture(" + quote(*file) + ")");
+        }
+        if (const XmlNode* col = node.child("BarColor")) {
+            line(var + ":SetStatusBarColor(" +
+                 std::to_string(col->attrFloat("r", 1.0f)) + ", " +
+                 std::to_string(col->attrFloat("g", 1.0f)) + ", " +
+                 std::to_string(col->attrFloat("b", 1.0f)) + ", " +
+                 std::to_string(col->attrFloat("a", 1.0f)) + ")");
+        }
         // A scroll frame's content, which is a frame like any other but reached
         // through SetScrollChild rather than sitting in Frames.
         // HybridScrollFrameScrollChild_OnLoad does self:GetParent().scrollChild
@@ -599,11 +653,18 @@ struct Emitter {
         // Whether or not this frame declared one: a template it inherits may
         // have installed the handler, and that frame still loads. The runtime
         // check costs nothing when there is none.
-        if (fireOnLoad) {
-            line("if " + var + ":GetScript(\"OnLoad\") then " +
-                 var + ":GetScript(\"OnLoad\")(" + var + ") end");
-        }
+        // hidden="true" is part of the frame's initial state, so OnLoad already
+        // sees it hidden. OnLoad runs under pcall because every frame in a file
+        // is built in one chunk: one handler throwing used to abandon the rest
+        // of the file, skipping later frames and their Hide(), which left the
+        // world map and character panels open over the game.
         if (node.attrBool("hidden")) line(var + ":Hide()");
+        if (fireOnLoad) {
+            line("do local __f = " + var + ":GetScript(\"OnLoad\") if __f then "
+                 "local __ok, __e = pcall(__f, " + var + ") if not __ok then "
+                 "__WoweeLogWarning(\"OnLoad \" .. tostring(" + var +
+                 ":GetName()) .. \": \" .. tostring(__e)) end end end");
+        }
     }
 };
 

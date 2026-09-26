@@ -78,7 +78,7 @@ public:
     bool pendingSeparateBags = true;
     bool pendingShowKeyring = true;
     float pendingBagScale = 1.0f;
-    bool pendingShowMicroMenu = false;
+    bool pendingShowMicroMenu = true;
 
     // ---- Pending gameplay ----
     bool pendingAutoLoot = false;

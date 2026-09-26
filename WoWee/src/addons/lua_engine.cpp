@@ -721,7 +721,35 @@ int lua_StatusBar_GetMinMaxValues(lua_State* L) {
     return 2;
 }
 int lua_StatusBar_SetValue(lua_State* L) {
-    if (auto* w = widgetOf(L, 1)) w->barValue = static_cast<float>(luaL_optnumber(L, 2, 0.0));
+    auto* w = widgetOf(L, 1);
+    if (!w) return 0;
+    const float value = static_cast<float>(luaL_optnumber(L, 2, 0.0));
+    if (value == w->barValue) return 0;
+    w->barValue = value;
+
+    // FrameXML colours health bars and updates their text from
+    // OnValueChanged. The handler assigns the `this`/arg1 globals, and the
+    // script that called SetValue is usually still running and still reading
+    // its own `this`, so both are put back afterwards.
+    lua_getfield(L, 1, "__scripts");
+    if (lua_istable(L, -1)) {
+        lua_getfield(L, -1, "OnValueChanged");
+        if (lua_isfunction(L, -1)) {
+            lua_getglobal(L, "this");
+            lua_getglobal(L, "arg1");
+            lua_pushvalue(L, -3);
+            lua_pushvalue(L, 1);
+            lua_pushnumber(L, value);
+            if (lua_pcall(L, 2, 0, 0) != 0) {
+                LOG_WARNING("StatusBar OnValueChanged: ", lua_tostring(L, -1));
+                lua_pop(L, 1);
+            }
+            lua_setglobal(L, "arg1");
+            lua_setglobal(L, "this");
+        }
+        lua_pop(L, 1);
+    }
+    lua_pop(L, 1);
     return 0;
 }
 /// SetCooldown(start, duration) — both on GetTime's clock. A zero duration is
@@ -1389,12 +1417,51 @@ void LuaEngine::registerCoreAPI() {
 
     // WoW-specific and not derivable from a standard library.
     bootstrap(
+        "function getglobal(n) return _G[n] end\n"
+        "function setglobal(n, v) _G[n] = v end\n"
         "function wipe(t) for k in pairs(t) do t[k] = nil end return t end\n"
         "function strtrim(s, chars)\n"
         "  chars = chars or ' \\t\\r\\n'\n"
         "  local p = '[' .. chars:gsub('(%W)', '%%%1') .. ']'\n"
         "  return (s:gsub('^' .. p .. '*', ''):gsub(p .. '*$', ''))\n"
         "end\n");
+
+    // 1.12 FrameXML calls the vanilla player-buff API, which later clients
+    // folded into UnitBuff/UnitDebuff. A vanilla buff index is 0-based and
+    // doubles as the handle the other GetPlayerBuff* calls take.
+    bootstrap(
+        "local function __aura(buffIndex, filter)\n"
+        "  if type(buffIndex) ~= 'number' or buffIndex < 0 then return nil end\n"
+        "  local harmful = filter and string.find(filter, 'HARMFUL')\n"
+        "  local fn = harmful and UnitDebuff or UnitBuff\n"
+        "  if not fn then return nil end\n"
+        "  return fn('player', buffIndex + 1)\n"
+        "end\n"
+        "__WoweePlayerBuffFilter = {}\n"
+        "function GetPlayerBuff(id, filter)\n"
+        "  local name, _, _, _, _, duration = __aura(id, filter)\n"
+        "  if not name then return -1, 0 end\n"
+        "  __WoweePlayerBuffFilter[id] = filter\n"
+        "  return id, ((duration or 0) == 0) and 1 or 0\n"
+        "end\n"
+        "function GetPlayerBuffTexture(i)\n"
+        "  local _, _, icon = __aura(i, __WoweePlayerBuffFilter[i]); return icon\n"
+        "end\n"
+        "function GetPlayerBuffApplications(i)\n"
+        "  local _, _, _, count = __aura(i, __WoweePlayerBuffFilter[i]); return count or 0\n"
+        "end\n"
+        "function GetPlayerBuffDispelType(i)\n"
+        "  local _, _, _, _, t = __aura(i, __WoweePlayerBuffFilter[i]); return t\n"
+        "end\n"
+        "function GetPlayerBuffTimeLeft(i)\n"
+        "  local _, _, _, _, _, _, expires = __aura(i, __WoweePlayerBuffFilter[i])\n"
+        "  if not expires or expires == 0 or not GetTime then return 0 end\n"
+        "  local left = expires - GetTime(); return left > 0 and left or 0\n"
+        "end\n"
+        "function CancelPlayerBuff(i)\n"
+        "  if CancelUnitBuff then CancelUnitBuff('player', i + 1) end\n"
+        "end\n"
+        "function GetInventoryItemCooldown(unit, slot) return 0, 0, 0 end\n");
 
     // SlashCmdList table — addons register slash commands here
     lua_newtable(L_);
@@ -1720,7 +1787,8 @@ void LuaEngine::registerCoreAPI() {
         "SetButtonState=1,SetBuybackItem=1,SetCamera=1,SetChecked=1,SetCheckedTexture=1,\n"
         "SetClampedToScreen=1,SetClampRectInsets=1,SetColorRGB=1,SetCooldown=1,\n"
         "SetCreature=1,SetCursorPosition=1,SetDesaturated=1,SetDisabledCheckedTexture=1,\n"
-        "SetDisabledFontObject=1,SetDisabledTexture=1,SetDisplayValue=1,SetDrawLayer=1,\n"
+        "SetDisabledFontObject=1,SetDisabledTextColor=1,SetDisabledTexture=1,\n"
+        "SetDisplayValue=1,SetDrawLayer=1,SetHighlightTextColor=1,\n"
         "SetEquipmentSet=1,SetFacing=1,SetFillAlpha=1,SetFillTexture=1,SetFocus=1,\n"
         "SetFont=1,SetFontObject=1,SetFontString=1,SetFormattedText=1,SetFrameLevel=1,\n"
         "SetFrameRate=1,SetFrameStrata=1,SetHeight=1,SetHighlightFontObject=1,\n"
@@ -1983,7 +2051,23 @@ void LuaEngine::registerCoreAPI() {
     // Noop stubs for commonly called functions that don't need implementation
     bootstrap(
         "function SetDesaturation() end\n"
-        "function SetPortraitTexture() end\n"
+        // The client renders the unit's model into the portrait; the stand-in
+        // is the race/sex portrait art 1.12 itself shows before that is ready.
+        "local __portraitRace = {'Human','Orc','Dwarf','NightElf','Scourge','Tauren','Gnome','Troll'}\n"
+        "function SetPortraitTexture(tex, unit)\n"
+        "  if type(tex) ~= 'table' or not tex.SetTexture then return end\n"
+        "  if UnitExists and not UnitExists(unit) then return end\n"
+        "  local path = 'Interface\\\\CharacterFrame\\\\TemporaryPortrait-Monster'\n"
+        "  if UnitIsPlayer and UnitIsPlayer(unit) then\n"
+        "    local _, _, raceId = UnitRace(unit)\n"
+        "    local race = __portraitRace[raceId or 0]\n"
+        "    if race then\n"
+        "      local sex = UnitSex and UnitSex(unit) == 3 and 'Female' or 'Male'\n"
+        "      path = 'Interface\\\\CharacterFrame\\\\TemporaryPortrait-' .. sex .. '-' .. race\n"
+        "    end\n"
+        "  end\n"
+        "  tex:SetTexture(path)\n"
+        "end\n"
         "function StopSound() end\n"
         "function UIParent_OnEvent() end\n"
         // Filling the screen, not sitting at a point on it. The widget tree's
@@ -2452,6 +2536,7 @@ void LuaEngine::registerCoreAPI() {
         // InterfaceOptionsFrame: addons register settings panels here
         "InterfaceOptionsFrame = CreateFrame('Frame', 'InterfaceOptionsFrame')\n"
         "InterfaceOptionsFramePanelContainer = CreateFrame('Frame', 'InterfaceOptionsFramePanelContainer')\n"
+        "InterfaceOptionsFrame:Hide()\n"
         "function InterfaceOptions_AddCategory(panel) end\n"
         "function InterfaceOptionsFrame_OpenToCategory(panel) end\n"
         // Commonly expected global tables
@@ -2711,13 +2796,17 @@ void LuaEngine::fireEvent(const std::string& eventName,
         return;
     }
 
+    // No addon-level handler must not end dispatch here: frames registered
+    // through frame:RegisterEvent() are served below, and most of FrameXML's
+    // events (UPDATE_CHAT_WINDOWS among them) have only frame listeners.
     lua_getglobal(L_, "__WoweeEvents");
-    if (lua_isnil(L_, -1)) { lua_pop(L_, 1); return; }
+    if (lua_istable(L_, -1)) {
+        lua_getfield(L_, -1, eventName.c_str());
+    } else {
+        lua_pushnil(L_);
+    }
 
-    lua_getfield(L_, -1, eventName.c_str());
-    if (lua_isnil(L_, -1)) { lua_pop(L_, 2); return; }
-
-    int handlerCount = static_cast<int>(lua_objlen(L_, -1));
+    int handlerCount = lua_istable(L_, -1) ? static_cast<int>(lua_objlen(L_, -1)) : 0;
     for (int i = 1; i <= handlerCount; i++) {
         lua_rawgeti(L_, -1, i);
         if (!lua_isfunction(L_, -1)) { lua_pop(L_, 1); continue; }

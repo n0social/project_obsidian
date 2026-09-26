@@ -1336,6 +1336,10 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
         addonManager_->loadAllAddons();
         app_.addonsLoaded_ = true;
         addonManager_->fireEvent("VARIABLES_LOADED");
+        // FrameXML applies each chat window's saved colour, alpha and dock
+        // position on this event; without it the chat background stays the
+        // untinted white of ChatFrameBackground.
+        addonManager_->fireEvent("UPDATE_CHAT_WINDOWS");
         addonManager_->fireEvent("PLAYER_LOGIN");
         addonManager_->fireEvent("PLAYER_ENTERING_WORLD");
     } else if (addonManager_ && app_.addonsLoaded_) {

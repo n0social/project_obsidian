@@ -404,11 +404,6 @@ bool Application::initialize() {
         widgetRenderer_.initialize(assetManager.get(),
                                    window ? window->getVkContext() : nullptr);
         LOG_INFO("Widget renderer initialized");
-#if defined(__ANDROID__)
-        // Lua/addon init still trips FORTIFY on this tablet. Keep WoW-style ImGui
-        // HUD for now; FrameXML remains opt-in via WOWEE_LOAD_FRAMEXML on desktop.
-        LOG_WARNING("Skipping FrameXML/addon scan on Android");
-#else
         if (addonManager_->initialize(gameHandler.get(), luaSvc)) {
             std::string addonsDir = assetPath + "/interface/AddOns";
             addonManager_->setFrameXmlDir(assetPath + "/interface/FrameXML");
@@ -805,7 +800,6 @@ bool Application::initialize() {
             LOG_WARNING("Failed to initialize addon system");
             addonManager_.reset();
         }
-#endif
 
         // Initialize world loader (handles terrain streaming, world preload, map transitions)
         worldLoader_ = std::make_unique<WorldLoader>(
@@ -2024,10 +2018,17 @@ void Application::update(float deltaTime) {
                 renderer->getTerrainManager()->setUpdateInterval(onTaxi ? 0.033f : 0.033f);
                 const int configuredLoadRadius = renderer->getTerrainLoadRadius();
                 const int configuredUnloadRadius = renderer->getTerrainUnloadRadius();
+#ifdef __ANDROID__
+                const int taxiLoadRadius = configuredLoadRadius + 1;
+                const int taxiUnloadRadius = configuredUnloadRadius + 1;
+#else
+                const int taxiLoadRadius = std::max(8, configuredLoadRadius);
+                const int taxiUnloadRadius = std::max(12, configuredUnloadRadius);
+#endif
                 renderer->getTerrainManager()->setLoadRadius(
-                    onTaxi ? std::max(8, configuredLoadRadius) : configuredLoadRadius);
+                    onTaxi ? taxiLoadRadius : configuredLoadRadius);
                 renderer->getTerrainManager()->setUnloadRadius(
-                    onTaxi ? std::max(12, configuredUnloadRadius) : configuredUnloadRadius);
+                    onTaxi ? taxiUnloadRadius : configuredUnloadRadius);
                 renderer->getTerrainManager()->setTaxiStreamingMode(onTaxi);
                 }
                 if (worldEntryCallbacks_) worldEntryCallbacks_->setLastTaxiFlight(actuallyFlying);

@@ -422,7 +422,10 @@ std::unordered_set<uint16_t> AppearanceComposer::buildDefaultPlayerGeosets(uint8
     activeGeosets.insert(kGeosetBareSleeves);
     activeGeosets.insert(kGeosetDefaultKneepads);
     activeGeosets.insert(kGeosetBarePants);
-    activeGeosets.insert(kGeosetWithCape);
+    // Group 15 variant 01 is the body with no cloak. Variant 02 is the cloak
+    // mesh, and it draws white until a cloak texture is bound. Other players
+    // already switch to 1502 only when inventory type 16 is equipped.
+    activeGeosets.insert(kGeosetNoCape);
     activeGeosets.insert(kGeosetBareFeet);
     return activeGeosets;
 }

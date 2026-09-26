@@ -343,7 +343,10 @@ void GameScreen::updateCharacterTextures(game::Inventory& inventory) {
     const auto& underwearPaths = app.getUnderwearPaths();
     uint32_t skinSlot = app.getSkinTextureSlotIndex();
 
-    if (bodySkinPath.empty()) return;
+    if (bodySkinPath.empty()) {
+        LOG_WARNING("Player armor composite skipped: body skin path not set yet");
+        return;
+    }
 
     // Component directory names indexed by region
     static constexpr const char* componentDirs[] = {
@@ -359,7 +362,10 @@ void GameScreen::updateCharacterTextures(game::Inventory& inventory) {
 
     // Load ItemDisplayInfo.dbc
     auto displayInfoDbc = assetManager->loadDBC("ItemDisplayInfo.dbc");
-    if (!displayInfoDbc) return;
+    if (!displayInfoDbc) {
+        LOG_WARNING("Player armor composite skipped: ItemDisplayInfo.dbc failed to load");
+        return;
+    }
     const auto* idiL = pipeline::getActiveDBCLayout()
         ? pipeline::getActiveDBCLayout()->getLayout("ItemDisplayInfo") : nullptr;
     uint32_t texRegionFields[8];
@@ -413,7 +419,18 @@ void GameScreen::updateCharacterTextures(game::Inventory& inventory) {
     charRenderer->clearCompositeCache();
     // Use per-instance texture override (not model-level) to avoid deleting cached composites.
     uint32_t instanceId = renderer->getCharacterInstanceId();
+    {
+        std::string equipped;
+        for (int s = 0; s < game::Inventory::NUM_EQUIP_SLOTS; s++) {
+            const auto& slot = inventory.getEquipSlot(static_cast<game::EquipSlot>(s));
+            if (slot.empty()) continue;
+            equipped += " " + std::to_string(s) + ":" + std::to_string(slot.item.displayInfoId);
+        }
+        LOG_DEBUG("Player armor composite: instance=", instanceId, " skinSlot=", skinSlot,
+                 " layers=", regionLayers.size(), " equipped[slot:display]=", equipped);
+    }
     auto* newTex = charRenderer->compositeWithRegions(bodySkinPath, underwearPaths, regionLayers);
+    if (!newTex) LOG_WARNING("Player armor composite: compositeWithRegions returned null");
     if (newTex != nullptr && instanceId != 0) {
         charRenderer->setTextureSlotOverride(instanceId, static_cast<uint16_t>(skinSlot), newTex);
     }
