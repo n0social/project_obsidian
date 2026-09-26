@@ -56,6 +56,27 @@ static int lua_GetActionTexture(lua_State* L) {
     return 1;
 }
 
+// GetBonusBarOffset() → which bonus page (slots 73+) replaces the main bar:
+// warrior stances 1-3, druid cat 1 / bear 3, rogue stealth 1.
+static int lua_GetBonusBarOffset(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    int offset = 0;
+    if (gh) {
+        switch (gh->getShapeshiftFormId()) {
+            case 1:  offset = 1; break;  // cat
+            case 5:                      // bear
+            case 8:  offset = 3; break;  // dire bear
+            case 17: offset = 1; break;  // battle stance
+            case 18: offset = 2; break;  // defensive stance
+            case 19: offset = 3; break;  // berserker stance
+            case 30: offset = 1; break;  // stealth
+            default: break;
+        }
+    }
+    lua_pushnumber(L, offset);
+    return 1;
+}
+
 // IsCurrentAction(slot) → boolean
 static int lua_IsCurrentAction(lua_State* L) {
     // Currently no "active action" tracking; return false
@@ -564,6 +585,7 @@ void registerActionLuaAPI(lua_State* L) {
     static const struct { const char* name; lua_CFunction func; } api[] = {
                 {"HasAction",           lua_HasAction},
                 {"GetActionTexture",    lua_GetActionTexture},
+                {"GetBonusBarOffset",   lua_GetBonusBarOffset},
                 {"IsCurrentAction",     lua_IsCurrentAction},
                 {"IsUsableAction",      lua_IsUsableAction},
                 {"IsActionInRange",     lua_IsActionInRange},

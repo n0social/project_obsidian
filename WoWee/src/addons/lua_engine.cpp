@@ -379,6 +379,19 @@ int lua_Region_IsShown(lua_State* L) {
     lua_pushboolean(L, w ? (w->shown ? 1 : 0) : 0);
     return 1;
 }
+// Shown and every ancestor shown. FrameXML guards work with this, e.g. spell
+// buttons skip updating while the closed spellbook holds them.
+int lua_Region_IsVisible(lua_State* L) {
+    const auto* w = widgetOf(L, 1);
+    auto* tree = wowee::addons::getWidgetTree(L);
+    bool visible = w != nullptr;
+    for (int depth = 0; w && depth < 64; ++depth) {
+        if (!w->shown) { visible = false; break; }
+        w = (tree && w->parent) ? tree->get(w->parent) : nullptr;
+    }
+    lua_pushboolean(L, visible ? 1 : 0);
+    return 1;
+}
 int lua_Region_SetAlpha(lua_State* L) {
     if (auto* w = widgetOf(L, 1)) w->alpha = static_cast<float>(luaL_optnumber(L, 2, 1.0));
     return 0;
@@ -462,6 +475,23 @@ int lua_Frame_SetFrameLevel(lua_State* L) {
         w->levelExplicit = true;
     }
     return 0;
+}
+// The level layout will give it, worked out now: FrameXML raises frames
+// relative to this (BonusActionBarFrame goes two above its own level to cover
+// the main bar), often from OnLoad before any layout has run.
+int lua_Frame_GetFrameLevel(lua_State* L) {
+    const auto* w = widgetOf(L, 1);
+    auto* tree = wowee::addons::getWidgetTree(L);
+    int above = 0;
+    int level = 0;
+    for (int depth = 0; w && depth < 64; ++depth) {
+        if (w->levelExplicit) { level = w->level; break; }
+        if (!w->parent || !tree) break;
+        ++above;
+        w = tree->get(w->parent);
+    }
+    lua_pushnumber(L, level + above);
+    return 1;
 }
 int lua_FontString_SetText(lua_State* L) {
     if (auto* w = widgetOf(L, 1)) w->text = luaL_optstring(L, 2, "");
@@ -593,7 +623,7 @@ void installRegionMethods(lua_State* L, bool isTexture, bool isFontString) {
     set("Show", lua_Region_Show);
     set("Hide", lua_Region_Hide);
     set("IsShown", lua_Region_IsShown);
-    set("IsVisible", lua_Region_IsShown);
+    set("IsVisible", lua_Region_IsVisible);
     set("SetAlpha", lua_Region_SetAlpha);
     set("GetAlpha", lua_Region_GetAlpha);
     set("SetVertexColor", lua_Region_SetVertexColor);
@@ -1461,7 +1491,67 @@ void LuaEngine::registerCoreAPI() {
         "function CancelPlayerBuff(i)\n"
         "  if CancelUnitBuff then CancelUnitBuff('player', i + 1) end\n"
         "end\n"
-        "function GetInventoryItemCooldown(unit, slot) return 0, 0, 0 end\n");
+        "function GetInventoryItemCooldown(unit, slot) return 0, 0, 0 end\n"
+        // Vanilla honor system: no ranking data is tracked yet, so every
+        // counter reads zero and the rank is "none" (0).
+        "function GetPVPSessionStats() return 0, 0, 0 end\n"
+        "function GetPVPYesterdayStats() return 0, 0, 0 end\n"
+        "function GetPVPThisWeekStats() return 0, 0 end\n"
+        "function GetPVPLastWeekStats() return 0, 0, 0, 0 end\n"
+        "function GetPVPLifetimeStats() return 0, 0, 0 end\n"
+        "function GetPVPRankProgress() return 0 end\n"
+        "function UnitPVPRank(unit) return 0 end\n"
+        "function GetPVPRankInfo(rank, unit)\n"
+        "  rank = rank or 0\n"
+        "  if rank < 5 then return nil, 0 end\n"
+        "  return rawget(_G, string.format('PVP_RANK_%d_0', rank)), rank - 4\n"
+        "end\n"
+        // Spelled this way in the 1.12 API and in ChatFrame.lua.
+        "function GetNumLaguages()\n"
+        "  local f = rawget(_G, 'GetNumLanguages'); return f and f() or 1\n"
+        "end\n"
+        "if not rawget(_G, 'GetLanguageByIndex') then\n"
+        "  function GetLanguageByIndex(i)\n"
+        "    local f = rawget(_G, 'GetDefaultLanguage'); return f and f('player') or 'Common'\n"
+        "  end\n"
+        "end\n"
+        "function ActionHasRange(slot) return IsActionInRange and IsActionInRange(slot) ~= nil end\n"
+        "function GetActionBarToggles() return nil, nil, nil, nil end\n"
+        "function PetHasActionBar() return HasPetUI and HasPetUI() or nil end\n"
+        "function UnitCharacterPoints(unit)\n"
+        "  local lvl = UnitLevel and UnitLevel(unit or 'player') or 1\n"
+        "  local spent = 0\n"
+        "  if GetNumTalentTabs and GetTalentTabInfo then\n"
+        "    for t = 1, GetNumTalentTabs() do\n"
+        "      local _, _, pts = GetTalentTabInfo(t); spent = spent + (pts or 0)\n"
+        "    end\n"
+        "  end\n"
+        "  local free = lvl - 9 - spent\n"
+        "  return free > 0 and free or 0, 0\n"
+        "end\n"
+        // No values at all: QuestTimerFrame counts them through arg.n.
+        "function GetQuestTimers() end\n"
+        "function RequestRaidInfo() end\n"
+        "function CanShowResetInstances() return nil end\n"
+        "function GetRepairAllCost() return 0, nil end\n"
+        "function IsInventoryItemLocked(slot) return nil end\n"
+        "function GetInventoryAlertStatus(slot) return 0 end\n"
+        "function OffhandHasWeapon() return nil end\n"
+        "function UnitHasRelicSlot(unit) return nil end\n"
+        "function HasKey() return 1 end\n"
+        "function ShowingHelm() return 1 end\n"
+        "function ShowingCloak() return 1 end\n"
+        "function HideNameplates() end\n"
+        "function HideFriendNameplates() end\n"
+        "function GetGMTicket() end\n"
+        "function CheckReadyCheckTime() end\n"
+        "function GuildControlGetRankFlags() return nil end\n"
+        "function GetChatWindowMessages(i) end\n"
+        "function GetChatWindowChannels(i) end\n"
+        "function UpdateMapHighlight(x, y) return nil end\n"
+        "function CreateWorldMapArrowFrame(f) end\n"
+        "function PositionWorldMapArrowFrame() end\n"
+        "function ShowWorldMapArrowFrame(show) end\n");
 
     // SlashCmdList table — addons register slash commands here
     lua_newtable(L_);
@@ -1487,7 +1577,7 @@ void LuaEngine::registerCoreAPI() {
         {"Show",            lua_Region_Show},
         {"Hide",            lua_Region_Hide},
         {"IsShown",         lua_Region_IsShown},
-        {"IsVisible",       lua_Region_IsShown}, // alias
+        {"IsVisible",       lua_Region_IsVisible},
         // Geometry goes through the widget tree. The older table-field
         // versions kept the numbers where only Lua could see them, which is
         // why a frame could be sized and positioned and still never appear.
@@ -1540,6 +1630,7 @@ void LuaEngine::registerCoreAPI() {
         {"GetCooldownTimes",      lua_Cooldown_GetCooldownTimes},
         {"SetFrameStrata",  lua_Frame_SetFrameStrata},
         {"SetFrameLevel",   lua_Frame_SetFrameLevel},
+        {"GetFrameLevel",   lua_Frame_GetFrameLevel},
         {"SetParent",       lua_Frame_SetParent},
         {"GetParent",       lua_Frame_GetParent},
         {"CreateTexture",   lua_Frame_CreateTexture},
@@ -1571,7 +1662,6 @@ void LuaEngine::registerCoreAPI() {
     bootstrap(
         "local mt = __WoweeFrameMT\n"
 
-        "function mt:GetFrameLevel() return self.__frameLevel or 1 end\n"
         "function mt:GetFrameStrata() return self.__strata or 'MEDIUM' end\n"
         "function mt:EnableMouseWheel(enable) end\n"
         "function mt:SetMovable(movable) end\n"
@@ -1656,6 +1746,59 @@ void LuaEngine::registerCoreAPI() {
         "        self[key] = tex\n"
         "    end\n"
         "    mt['Get' .. slot] = function(self) return self[key] end\n"
+        "end\n"
+        // Only the art for the button's current state is shown: pushed while
+        // held, checked while checked, disabled while disabled, highlight while
+        // locked (there is no hover on touch). Otherwise every state layer
+        // draws at once and buries the icon beneath it.
+        "local function show(t, on)\n"
+        "    if type(t) ~= 'table' then return end\n"
+        "    if on then t:Show() else t:Hide() end\n"
+        "end\n"
+        "function __WoweeButtonRefresh(self)\n"
+        "    local disabled, pushed = self.__disabled, self.__pushed\n"
+        "    local hasDisabled = type(self.__DisabledTexture) == 'table'\n"
+        "    local hasPushed = type(self.__PushedTexture) == 'table'\n"
+        "    show(self.__NormalTexture, not (disabled and hasDisabled) and not (pushed and hasPushed))\n"
+        "    show(self.__PushedTexture, pushed and not disabled)\n"
+        "    show(self.__DisabledTexture, disabled)\n"
+        "    show(self.__CheckedTexture, self.__checked and not disabled)\n"
+        "    show(self.__DisabledCheckedTexture, self.__checked and disabled)\n"
+        "    show(self.__HighlightTexture, self.__highlightLocked)\n"
+        "end\n"
+        "for _, slot in ipairs({'NormalTexture', 'PushedTexture', 'HighlightTexture',\n"
+        "                       'DisabledTexture', 'CheckedTexture',\n"
+        "                       'DisabledCheckedTexture'}) do\n"
+        "    local set = mt['Set' .. slot]\n"
+        "    mt['Set' .. slot] = function(self, tex) set(self, tex) __WoweeButtonRefresh(self) end\n"
+        "end\n"
+        "function mt:SetChecked(v)\n"
+        "    self.__checked = (v and v ~= 0) and true or nil\n"
+        "    __WoweeButtonRefresh(self)\n"
+        "end\n"
+        "function mt:GetChecked() return self.__checked and 1 or nil end\n"
+        "function mt:SetButtonState(state, locked)\n"
+        "    self.__pushed = (state == 'PUSHED') or nil\n"
+        "    __WoweeButtonRefresh(self)\n"
+        "end\n"
+        "function mt:GetButtonState() return self.__pushed and 'PUSHED' or 'NORMAL' end\n"
+        "function mt:LockHighlight() self.__highlightLocked = true __WoweeButtonRefresh(self) end\n"
+        "function mt:UnlockHighlight() self.__highlightLocked = nil __WoweeButtonRefresh(self) end\n"
+        "do\n"
+        "    local enable, disable = rawget(mt, 'Enable'), rawget(mt, 'Disable')\n"
+        "    function mt:Enable(...)\n"
+        "        self.__disabled = nil\n"
+        "        if enable then enable(self, ...) end\n"
+        "        __WoweeButtonRefresh(self)\n"
+        "    end\n"
+        "    function mt:Disable(...)\n"
+        "        self.__disabled = true\n"
+        "        if disable then disable(self, ...) end\n"
+        "        __WoweeButtonRefresh(self)\n"
+        "    end\n"
+        "    if not rawget(mt, 'IsEnabled') then\n"
+        "        function mt:IsEnabled() return self.__disabled and 0 or 1 end\n"
+        "    end\n"
         "end\n"
         // Attributes, and the OnAttributeChanged they fire.
         //
@@ -2564,7 +2707,6 @@ void LuaEngine::registerCoreAPI() {
         "local _actionBarPage = 1\n"
         "function GetActionBarPage() return _actionBarPage end\n"
         "function ChangeActionBarPage(page) _actionBarPage = page end\n"
-        "function GetBonusBarOffset() return 0 end\n"
         // Action type query
         "function GetActionText(slot) return nil end\n"
         "function GetActionCount(slot) return 0 end\n"

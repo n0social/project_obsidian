@@ -753,6 +753,15 @@ void EntityController::applyPlayerTransportState(const UpdateBlock& block,
     }
 }
 
+// UNIT_FIELD_BYTES_1 byte positions: 1.12 puts the shapeshift form in byte 2
+// and the visibility flags in byte 3; later clients swap them.
+static uint8_t bytes1Form(uint32_t val) {
+    return static_cast<uint8_t>(val >> (isClassicLikeExpansion() ? 16 : 24));
+}
+static uint8_t bytes1VisFlags(uint32_t val) {
+    return static_cast<uint8_t>(val >> (isClassicLikeExpansion() ? 24 : 16));
+}
+
 //     Apply unit fields during CREATE — sets health/power/level/flags/displayId/etc.
 //     Returns true if the entity is initially dead (health=0 or DYNFLAG_DEAD).
 bool EntityController::applyUnitFieldsOnCreate(const UpdateBlock& block,
@@ -799,6 +808,20 @@ bool EntityController::applyUnitFieldsOnCreate(const UpdateBlock& block,
         }
         else if (key == ufi.bytes0) {
             unit->setPowerType(static_cast<uint8_t>((val >> 24) & 0xFF));
+        }
+        // A warrior logs in already in Battle Stance, so the form arrives
+        // here rather than as a later change.
+        else if (ufi.bytes1 != 0xFFFF && key == ufi.bytes1) {
+            unit->setVisibilityFlags(bytes1VisFlags(val));
+            if (block.guid == owner_.getPlayerGuid()) {
+                const uint8_t form = bytes1Form(val);
+                if (form != owner_.shapeshiftFormIdRef()) {
+                    owner_.shapeshiftFormIdRef() = form;
+                    pendingEvents_.emit("UPDATE_SHAPESHIFT_FORM", {});
+                    pendingEvents_.emit("UPDATE_SHAPESHIFT_FORMS", {});
+                    pendingEvents_.emit("UPDATE_BONUS_ACTIONBAR", {});
+                }
+            }
         } else if (key == ufi.displayId) {
             unit->setDisplayId(val);
             if (owner_.addonEventCallbackRef()) {
@@ -965,7 +988,7 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
         }
         else if (ufi.bytes1 != 0xFFFF && key == ufi.bytes1) {
             const uint8_t oldVisibilityFlags = unit->getVisibilityFlags();
-            const uint8_t newVisibilityFlags = static_cast<uint8_t>((val >> 16) & 0xFF);
+            const uint8_t newVisibilityFlags = bytes1VisFlags(val);
             unit->setVisibilityFlags(newVisibilityFlags);
 
             if (block.guid == owner_.getPlayerGuid()) {
@@ -975,12 +998,13 @@ EntityController::UnitFieldUpdateResult EntityController::applyUnitFieldsOnUpdat
                     owner_.stealthStateCallbackRef()(nowStealthed);
                 }
 
-                uint8_t newForm = static_cast<uint8_t>((val >> 24) & 0xFF);
+                uint8_t newForm = bytes1Form(val);
                 if (newForm != owner_.shapeshiftFormIdRef()) {
                     owner_.shapeshiftFormIdRef() = newForm;
                     LOG_INFO("Shapeshift form changed: ", static_cast<int>(newForm));
                     pendingEvents_.emit("UPDATE_SHAPESHIFT_FORM", {});
                     pendingEvents_.emit("UPDATE_SHAPESHIFT_FORMS", {});
+                    pendingEvents_.emit("UPDATE_BONUS_ACTIONBAR", {});
                 }
             }
         }

@@ -375,16 +375,17 @@ struct Emitter {
         }
 
         // Inheriting copies the settings first, so anything stated here wins —
-        // the same order a frame's template follows.
+        // the same order a frame's template follows. rawget: the missing-API
+        // fallback answers unknown globals with a function.
         if (const std::string* inh = node.attr("inherits"); inh && !inh->empty()) {
             line(name + " = {}");
-            line("do local base = _G[" + quote(*inh) + "]");
+            line("do local base = rawget(_G, " + quote(*inh) + ")");
             line("  if type(base) == 'table' then");
             line("    for k, v in pairs(base) do " + name + "[k] = v end");
             line("  end");
             line("end");
         } else {
-            line(name + " = " + name + " or {}");
+            line(name + " = rawget(_G, " + quote(name) + ") or {}");
         }
         if (height > 0.0f) line(name + ".height = " + std::to_string(height));
         if (const std::string* f = node.attr("font"))
@@ -479,6 +480,9 @@ struct Emitter {
         if (const std::string* id = node.attr("id"); id && !id->empty()) {
             line(var + ":SetID(" + *id + ")");
         }
+        // Children run OnLoad while this body is still being built, and they
+        // check IsVisible() through it.
+        if (node.attrBool("hidden")) line(var + ":Hide()");
         // Before the template applies, so a template body that reaches back
         // through its parent for a sibling finds it already bound.
         emitParentKey(node, var, parentArg);

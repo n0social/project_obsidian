@@ -357,7 +357,9 @@ void WidgetRenderer::render(WidgetTree& tree, float screenW, float screenH) {
                             w->rectW, "x", w->rectH, ")",
                             " anchors=", w->anchors.size(),
                             " shown=", w->shown ? 1 : 0,
-                            " visible=", w->visible ? 1 : 0);
+                            " visible=", w->visible ? 1 : 0,
+                            " strata=", static_cast<int>(w->effStrata),
+                            " level=", w->effLevel);
             }
         }
     }

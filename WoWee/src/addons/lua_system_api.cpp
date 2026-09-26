@@ -849,7 +849,6 @@ void registerSystemLuaAPI(lua_State* L) {
                 // are read on. No bonus or multi-cast bar is showing,
                 // and that is zero rather than nothing.
                 {"GetMultiCastBarOffset",    lua_ReturnZero},
-                {"GetBonusBarOffset",        lua_ReturnZero},
                 {"GetNumBattlegroundTypes",  lua_ReturnZero},
                 {"GetCurrentMapDungeonLevel", lua_ReturnZero},
                 {"Sound_GameSystem_GetNumOutputDrivers", lua_ReturnZero},

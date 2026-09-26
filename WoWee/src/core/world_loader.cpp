@@ -1342,6 +1342,8 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
         addonManager_->fireEvent("UPDATE_CHAT_WINDOWS");
         addonManager_->fireEvent("PLAYER_LOGIN");
         addonManager_->fireEvent("PLAYER_ENTERING_WORLD");
+        // The login stance arrived before FrameXML existed to hear about it.
+        addonManager_->fireEvent("UPDATE_BONUS_ACTIONBAR");
     } else if (addonManager_ && app_.addonsLoaded_) {
         // Subsequent world entries (e.g. teleport, instance entry)
         addonManager_->fireEvent("PLAYER_ENTERING_WORLD");

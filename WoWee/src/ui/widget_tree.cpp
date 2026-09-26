@@ -1,6 +1,7 @@
 #include "ui/widget_tree.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 
 namespace wowee {
@@ -97,7 +98,21 @@ void WidgetTree::clearPoints(uint32_t id) {
 }
 
 void WidgetTree::addPoint(uint32_t id, const Anchor& anchor) {
-    if (Widget* w = get(id)) w->anchors.push_back(anchor);
+    Widget* w = get(id);
+    if (!w) return;
+    // Setting a point that is already set moves it, as in WoW; a frame that
+    // slides (the bonus action bar) re-sets the same point every frame.
+    auto samePoint = [&](const Anchor& a) {
+        if (a.point.size() != anchor.point.size()) return false;
+        for (size_t i = 0; i < a.point.size(); ++i)
+            if (std::toupper(static_cast<unsigned char>(a.point[i])) !=
+                std::toupper(static_cast<unsigned char>(anchor.point[i]))) return false;
+        return true;
+    };
+    for (Anchor& a : w->anchors) {
+        if (samePoint(a)) { a = anchor; return; }
+    }
+    w->anchors.push_back(anchor);
 }
 
 void WidgetTree::setAllPoints(uint32_t id, uint32_t relativeTo) {
