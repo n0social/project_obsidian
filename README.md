@@ -7,6 +7,7 @@ Android client for **Vanilla World of Warcraft 1.12**, built on the open-source 
 
 You can boot, authenticate, and enter a 1.12 realm on a tablet in some cases, but session stability and character presentation still have known failures. Treat this repo as an experimental port, not a polished client.
 
+Play on a tablet: [PLAYING.md](PLAYING.md)  
 Living detail: [STATUS.md](STATUS.md) · remaining work: [TODO.md](TODO.md)
 
 ## Based on WoWee
@@ -24,6 +25,7 @@ Living detail: [STATUS.md](STATUS.md) · remaining work: [TODO.md](TODO.md)
 ## Repo layout
 
 ```
+PLAYING.md                       tablet steps: install, extract, sign in, enter world
 android/                         Obsydian Android app (SDLActivity + NDK → libwowee.so)
 scripts/                         setup / build / install / emulator / data-push
 patches/wowee-android-port.patch
