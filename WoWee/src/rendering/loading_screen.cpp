@@ -1,5 +1,6 @@
 #include "rendering/loading_screen.hpp"
 #include "rendering/vk_context.hpp"
+#include "pipeline/asset_manager.hpp"
 #include "core/logger.hpp"
 #include <imgui.h>
 #include <imgui_internal.h>
@@ -9,6 +10,8 @@
 #include <random>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
+#include <vector>
 
 #define STB_IMAGE_IMPLEMENTATION
 #include "stb_image.h"
@@ -17,7 +20,11 @@ namespace wowee {
 namespace rendering {
 
 LoadingScreen::LoadingScreen() {
-    imagePaths.push_back("assets/krayonload.png");
+    // Classic glue loading art (BLP via AssetManager). PNG fallback is optional.
+    imagePaths.push_back("Interface\\Glues\\LoadingScreens\\LoadScreenKalimdor.blp");
+    imagePaths.push_back("Interface\\Glues\\LoadingScreens\\LoadScreenEasternKingdom.blp");
+    imagePaths.push_back("Interface\\Glues\\LoadingScreens\\LoadScreenDungeon.blp");
+    imagePaths.push_back("Interface\\Glues\\loading.blp");
 }
 
 LoadingScreen::~LoadingScreen() {
@@ -57,17 +64,26 @@ void LoadingScreen::shutdown() {
 }
 
 void LoadingScreen::selectRandomImage() {
-    if (imagePaths.empty()) return;
+    if (imagePaths.empty()) {
+        loadImage(std::string());
+        return;
+    }
 
     unsigned seed = static_cast<unsigned>(
         std::chrono::system_clock::now().time_since_epoch().count());
     std::default_random_engine generator(seed);
-    std::uniform_int_distribution<int> distribution(0, imagePaths.size() - 1);
+    std::uniform_int_distribution<int> distribution(0, static_cast<int>(imagePaths.size()) - 1);
 
-    currentImageIndex = distribution(generator);
-    LOG_INFO("Selected loading screen: ", imagePaths[currentImageIndex]);
-
-    loadImage(imagePaths[currentImageIndex]);
+    // Try a few random candidates so a missing custom PNG does not blank the screen.
+    for (int attempt = 0; attempt < static_cast<int>(imagePaths.size()); ++attempt) {
+        currentImageIndex = distribution(generator);
+        LOG_INFO("Selected loading screen: ", imagePaths[currentImageIndex]);
+        if (loadImage(imagePaths[currentImageIndex])) {
+            return;
+        }
+    }
+    LOG_WARNING("Loading screen: all candidates failed — using procedural backdrop");
+    loadImage(std::string());
 }
 
 static uint32_t findMemoryType(VkPhysicalDevice physDevice, uint32_t typeFilter, VkMemoryPropertyFlags properties) {
@@ -82,39 +98,16 @@ static uint32_t findMemoryType(VkPhysicalDevice physDevice, uint32_t typeFilter,
     return UINT32_MAX;
 }
 
-bool LoadingScreen::loadImage(const std::string& path) {
-    if (!vkCtx) {
-        LOG_WARNING("No VkContext for loading screen image");
-        return false;
-    }
+bool LoadingScreen::uploadRgba(const unsigned char* data, int width, int height) {
+    if (!vkCtx || !data || width <= 0 || height <= 0) return false;
 
-    // Clean up old image
-    if (bgImage) {
-        VkDevice device = vkCtx->getDevice();
-        vkDeviceWaitIdle(device);
-        bgSampler = VK_NULL_HANDLE; // Owned by VkContext sampler cache
-        if (bgImageView) { vkDestroyImageView(device, bgImageView, nullptr); bgImageView = VK_NULL_HANDLE; }
-        if (bgImage) { vkDestroyImage(device, bgImage, nullptr); bgImage = VK_NULL_HANDLE; }
-        if (bgMemory) { vkFreeMemory(device, bgMemory, nullptr); bgMemory = VK_NULL_HANDLE; }
-        bgDescriptorSet = VK_NULL_HANDLE;
-    }
-
-    int channels;
-    stbi_set_flip_vertically_on_load(false); // ImGui expects top-down
-    unsigned char* data = stbi_load(path.c_str(), &imageWidth, &imageHeight, &channels, 4);
-
-    if (!data) {
-        LOG_ERROR("Failed to load loading screen image: ", path);
-        return false;
-    }
-
-    LOG_INFO("Loaded loading screen image: ", imageWidth, "x", imageHeight);
+    imageWidth = width;
+    imageHeight = height;
 
     VkDevice device = vkCtx->getDevice();
     VkPhysicalDevice physDevice = vkCtx->getPhysicalDevice();
     VkDeviceSize imageSize = static_cast<VkDeviceSize>(imageWidth) * imageHeight * 4;
 
-    // Create staging buffer
     VkBuffer stagingBuffer;
     VkDeviceMemory stagingMemory;
     {
@@ -138,13 +131,10 @@ bool LoadingScreen::loadImage(const std::string& path) {
 
         void* mapped;
         vkMapMemory(device, stagingMemory, 0, imageSize, 0, &mapped);
-        memcpy(mapped, data, imageSize);
+        memcpy(mapped, data, static_cast<size_t>(imageSize));
         vkUnmapMemory(device, stagingMemory);
     }
 
-    stbi_image_free(data);
-
-    // Create image
     {
         VkImageCreateInfo imgInfo{};
         imgInfo.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO;
@@ -172,9 +162,7 @@ bool LoadingScreen::loadImage(const std::string& path) {
         vkBindImageMemory(device, bgImage, bgMemory, 0);
     }
 
-    // Transfer: transition, copy, transition
     vkCtx->immediateSubmit([&](VkCommandBuffer cmd) {
-        // Transition to transfer dst
         VkImageMemoryBarrier barrier{};
         barrier.sType = VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER;
         barrier.oldLayout = VK_IMAGE_LAYOUT_UNDEFINED;
@@ -188,14 +176,12 @@ bool LoadingScreen::loadImage(const std::string& path) {
         vkCmdPipelineBarrier(cmd, VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT,
             VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
 
-        // Copy buffer to image
         VkBufferImageCopy region{};
         region.imageSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1};
         region.imageExtent = {static_cast<uint32_t>(imageWidth), static_cast<uint32_t>(imageHeight), 1};
         vkCmdCopyBufferToImage(cmd, stagingBuffer, bgImage,
             VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &region);
 
-        // Transition to shader read
         barrier.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL;
         barrier.newLayout = VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL;
         barrier.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT;
@@ -204,11 +190,9 @@ bool LoadingScreen::loadImage(const std::string& path) {
             VK_PIPELINE_STAGE_FRAGMENT_SHADER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
     });
 
-    // Cleanup staging
     vkDestroyBuffer(device, stagingBuffer, nullptr);
     vkFreeMemory(device, stagingMemory, nullptr);
 
-    // Create image view
     {
         VkImageViewCreateInfo viewInfo{};
         viewInfo.sType = VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO;
@@ -219,7 +203,6 @@ bool LoadingScreen::loadImage(const std::string& path) {
         vkCreateImageView(device, &viewInfo, nullptr, &bgImageView);
     }
 
-    // Create sampler
     {
         VkSamplerCreateInfo samplerInfo{};
         samplerInfo.sType = VK_STRUCTURE_TYPE_SAMPLER_CREATE_INFO;
@@ -231,11 +214,75 @@ bool LoadingScreen::loadImage(const std::string& path) {
         bgSampler = vkCtx->getOrCreateSampler(samplerInfo);
     }
 
-    // Register with ImGui as a texture
     bgDescriptorSet = ImGui_ImplVulkan_AddTexture(bgSampler, bgImageView,
         VK_IMAGE_LAYOUT_SHADER_READ_ONLY_OPTIMAL);
-
     return true;
+}
+
+bool LoadingScreen::loadImage(const std::string& path) {
+    if (!vkCtx) {
+        LOG_WARNING("No VkContext for loading screen image");
+        return false;
+    }
+
+    if (bgImage) {
+        VkDevice device = vkCtx->getDevice();
+        vkDeviceWaitIdle(device);
+        bgSampler = VK_NULL_HANDLE;
+        if (bgImageView) { vkDestroyImageView(device, bgImageView, nullptr); bgImageView = VK_NULL_HANDLE; }
+        if (bgImage) { vkDestroyImage(device, bgImage, nullptr); bgImage = VK_NULL_HANDLE; }
+        if (bgMemory) { vkFreeMemory(device, bgMemory, nullptr); bgMemory = VK_NULL_HANDLE; }
+        bgDescriptorSet = VK_NULL_HANDLE;
+    }
+
+    std::vector<uint8_t> owned;
+    const unsigned char* pixels = nullptr;
+
+    if (!path.empty() && assetManager_ && assetManager_->isInitialized()) {
+        pipeline::BLPImage blp = assetManager_->loadTexture(path);
+        if (blp.isValid() && !blp.data.empty()) {
+            owned = std::move(blp.data);
+            imageWidth = blp.width;
+            imageHeight = blp.height;
+            pixels = owned.data();
+            LOG_INFO("Loaded loading screen BLP: ", path, " ", imageWidth, "x", imageHeight);
+        }
+    }
+
+    if (!pixels && !path.empty()) {
+        int channels = 0;
+        stbi_set_flip_vertically_on_load(false);
+        unsigned char* data = stbi_load(path.c_str(), &imageWidth, &imageHeight, &channels, 4);
+        if (data) {
+            owned.assign(data, data + static_cast<size_t>(imageWidth) * imageHeight * 4);
+            stbi_image_free(data);
+            pixels = owned.data();
+            LOG_INFO("Loaded loading screen image: ", path, " ", imageWidth, "x", imageHeight);
+        }
+    }
+
+    if (!pixels) {
+        // Obsidian procedural backdrop — never leave enter-world as a blank flash.
+        imageWidth = 256;
+        imageHeight = 256;
+        owned.resize(static_cast<size_t>(imageWidth) * imageHeight * 4);
+        for (int y = 0; y < imageHeight; ++y) {
+            for (int x = 0; x < imageWidth; ++x) {
+                float t = static_cast<float>(y) / static_cast<float>(imageHeight - 1);
+                size_t i = (static_cast<size_t>(y) * imageWidth + x) * 4;
+                owned[i + 0] = static_cast<uint8_t>(12 + t * 28);
+                owned[i + 1] = static_cast<uint8_t>(8 + t * 10);
+                owned[i + 2] = static_cast<uint8_t>(28 + t * 48);
+                owned[i + 3] = 255;
+            }
+        }
+        pixels = owned.data();
+        if (!path.empty()) {
+            LOG_WARNING("Failed to load loading screen image: ", path, " — using procedural backdrop");
+        }
+    }
+
+    return uploadRgba(pixels, imageWidth, imageHeight);
 }
 
 void LoadingScreen::renderOverlay() {

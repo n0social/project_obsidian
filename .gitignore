@@ -1,9 +1,14 @@
-# Local game client + extracted assets (do not publish)
+# Vendored native deps (track StormLib for on-device extract)
+# /third_party/ is intentionally tracked for StormLib.
+/third_party/StormLib/.git/
+
+# Local game client, caches, and pulled device logs (do not publish)
 /RetroWoW*/
 /retro_wow/
 /WoWee-master.zip
 /vcpkg-master.zip
 /tools-cache/
+/logs_pull/
 
 # WoWee: track engine source; ignore bulky / private trees
 /WoWee/Data/

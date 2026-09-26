@@ -52,6 +52,7 @@ public class MainActivity extends SDLActivity {
         File dataDir = ensureDataDirectory();
         File configDir = ObsidianSettings.configDir(this);
         extractBundledWardenCache(new File(dataDir.getParentFile(), "warden_cache"));
+        ObsidianUiOverlay.apply(this);
         boolean autoLogin = getIntent() != null
                 && getIntent().getBooleanExtra(EXTRA_AUTO_LOGIN, true);
         try {
@@ -65,7 +66,7 @@ public class MainActivity extends SDLActivity {
             Os.setenv("OBSIDIAN_RELATIVE_MOUSE",
                     prefs.getBoolean(ObsidianSettings.KEY_RELATIVE_MOUSE, false) ? "1" : "0", true);
             String realmHost = LauncherActivity.sanitizeHost(
-                    prefs.getString(ObsidianSettings.KEY_REALM_HOST, "logon.retro-wow.org"));
+                    prefs.getString(ObsidianSettings.KEY_REALM_HOST, ""));
             Os.setenv("OBSIDIAN_REALM_HOST", realmHost, true);
             Os.setenv("OBSIDIAN_REALM_PORT",
                     Integer.toString(prefs.getInt(ObsidianSettings.KEY_REALM_PORT, 3724)), true);
@@ -74,6 +75,20 @@ public class MainActivity extends SDLActivity {
             Os.setenv("OBSIDIAN_ACCOUNT_PASS",
                     prefs.getString(ObsidianSettings.KEY_ACCOUNT_PASS, ""), true);
             Os.setenv("OBSIDIAN_NATIVE_LOGIN", autoLogin ? "1" : "0", true);
+            Log.i(TAG, "Native login host=" + realmHost
+                    + ":" + prefs.getInt(ObsidianSettings.KEY_REALM_PORT, 3724)
+                    + " user=" + prefs.getString(ObsidianSettings.KEY_ACCOUNT_USER, ""));
+
+            // Tablet memory profile: downsample textures + smaller GPU caches.
+            // Does not tear meshes — only softens fidelity / draw cost.
+            int maxTex = ObsidianSettings.textureMaxDim(prefs);
+            if (maxTex > 0) {
+                Os.setenv("WOWEE_MAX_TEX_DIM", Integer.toString(maxTex), true);
+            }
+            Os.setenv("WOWEE_TERRAIN_TEX_CACHE_MB", "256", true);
+            Os.setenv("WOWEE_M2_TEX_CACHE_MB", "256", true);
+            Os.setenv("WOWEE_WMO_TEX_CACHE_MB", "384", true);
+            Os.setenv("WOWEE_CHARACTER_TEX_CACHE_MB", "192", true);
         } catch (Throwable t) {
             Log.w(TAG, "Failed to setenv", t);
         }
@@ -181,7 +196,7 @@ public class MainActivity extends SDLActivity {
                             + "Copy the WoWee extraction output so that ONE of these exists:\n"
                             + "  " + data.getAbsolutePath() + "/manifest.json\n"
                             + "  " + data.getAbsolutePath() + "/expansions/classic/manifest.json\n\n"
-                            + "Do not place Blizzard MPQs here — use WoWee's extract_assets tool on PC first.\n";
+                            + "Use Data → Select WoW client folder (built-in extractor) or Import extracted Data.\n";
             try (java.io.FileWriter w = new java.io.FileWriter(readme, false)) {
                 w.write(text);
             }

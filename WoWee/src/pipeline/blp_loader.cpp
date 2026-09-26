@@ -432,6 +432,41 @@ void BLPLoader::decompressPalette(const uint8_t* src, uint8_t* dst, const uint32
     }
 }
 
+void BLPLoader::downsampleToMaxDim(BLPImage& image, int maxDim) {
+    if (!image.isValid() || maxDim <= 0) return;
+    if (image.width <= maxDim && image.height <= maxDim) return;
+
+    const int srcW = image.width;
+    const int srcH = image.height;
+    const float scale = static_cast<float>(maxDim) /
+                        static_cast<float>(std::max(srcW, srcH));
+    int dstW = std::max(1, static_cast<int>(srcW * scale + 0.5f));
+    int dstH = std::max(1, static_cast<int>(srcH * scale + 0.5f));
+    // Keep even dims for nicer GPU mip chains / DXT-friendly future paths.
+    if (dstW > 1 && (dstW & 1)) dstW -= 1;
+    if (dstH > 1 && (dstH & 1)) dstH -= 1;
+
+    std::vector<uint8_t> out(static_cast<size_t>(dstW) * static_cast<size_t>(dstH) * 4u);
+    for (int y = 0; y < dstH; ++y) {
+        const int srcY = std::min(srcH - 1, (y * srcH) / dstH);
+        for (int x = 0; x < dstW; ++x) {
+            const int srcX = std::min(srcW - 1, (x * srcW) / dstW);
+            const size_t si = (static_cast<size_t>(srcY) * srcW + srcX) * 4u;
+            const size_t di = (static_cast<size_t>(y) * dstW + x) * 4u;
+            out[di] = image.data[si];
+            out[di + 1] = image.data[si + 1];
+            out[di + 2] = image.data[si + 2];
+            out[di + 3] = image.data[si + 3];
+        }
+    }
+
+    image.width = dstW;
+    image.height = dstH;
+    image.data = std::move(out);
+    image.mipmaps.clear();
+    image.mipLevels = 1;
+}
+
 const char* BLPLoader::getFormatName(BLPFormat format) {
     switch (format) {
         case BLPFormat::BLP0: return "BLP0";

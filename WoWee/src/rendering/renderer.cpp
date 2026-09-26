@@ -1678,6 +1678,15 @@ void Renderer::update(float deltaTime) {
 
 void Renderer::runDeferredWorldInitStep(float deltaTime) {
     if (!deferredWorldInitEnabled_ || !deferredWorldInitPending_ || !cachedAssetManager) return;
+    // Warmup calls Renderer::update every frame. Stage 0 is AmbientSoundManager
+    // (~1.5s of WAV reads) which used to run on the loading screen and starve
+    // Kronos of heartbeats. Hold until the world is actually entered.
+    if (auto* wl = core::Application::getInstance().getWorldLoader()) {
+        if (wl->isLoadingWorld()) {
+            deferredWorldInitCooldown_ = 2.0f;
+            return;
+        }
+    }
     if (deferredWorldInitCooldown_ > 0.0f) {
         deferredWorldInitCooldown_ = std::max(0.0f, deferredWorldInitCooldown_ - deltaTime);
         if (deferredWorldInitCooldown_ > 0.0f) return;
@@ -2375,6 +2384,13 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
 
     LOG_INFO("Initializing renderers for map: ", mapName);
 
+    auto pumpStayAlive = []() {
+        if (auto* gh = core::Application::getInstance().getGameHandler()) {
+            gh->pumpWardenIo();
+        }
+    };
+    pumpStayAlive();
+
     // Scan for custom zones on first initialization
     if (customZones_.empty()) {
         customZones_ = pipeline::CustomZoneDiscovery::scan({"custom_zones", "output"});
@@ -2563,12 +2579,15 @@ bool Renderer::initializeRenderers(pipeline::AssetManager* assetManager, const s
     if (audioCoordinator_->getMusicManager() && assetManager && !cachedAssetManager) {
         audio::AudioEngine::instance().setAssetManager(assetManager);
         audioCoordinator_->getMusicManager()->initialize(assetManager);
+        pumpStayAlive();
         if (audioCoordinator_->getFootstepManager()) {
             audioCoordinator_->getFootstepManager()->initialize(assetManager);
         }
+        pumpStayAlive();
         if (audioCoordinator_->getActivitySoundManager()) {
             audioCoordinator_->getActivitySoundManager()->initialize(assetManager);
         }
+        pumpStayAlive();
         if (audioCoordinator_->getMountSoundManager()) {
             audioCoordinator_->getMountSoundManager()->initialize(assetManager);
         }
@@ -2692,27 +2711,14 @@ bool Renderer::loadTestTerrain(pipeline::AssetManager* assetManager, const std::
 
     LOG_INFO("Enqueuing initial tile [", tileX, ",", tileY, "] via terrain manager");
 
-    // Enqueue the initial tile for async loading (avoids long sync stalls)
+    // Enqueue only — a synchronous loadTile here froze the main thread for ~5s
+    // on Android, so FORCE_MOVE_ROOT/UNROOT never got ACKed and Kronos closed
+    // the world socket while the loading screen was still up. Workers plus
+    // warmup (one tile) bring the spawn ADT in without starving ACKs.
     if (!terrainManager->enqueueTile(tileX, tileY)) {
         LOG_ERROR("Failed to enqueue initial tile [", tileX, ",", tileY, "]");
         return false;
     }
-
-#ifdef __ANDROID__
-    // Guarantee the spawn tile lands before gravity resumes. Async workers on
-    // 3 GB tablets used to stall forever under false memory-pressure, leaving
-    // chunks=0 and the player falling through an empty world.
-    if (!terrainManager->loadTile(tileX, tileY)) {
-        LOG_ERROR("Synchronous spawn-tile load failed [", tileX, ",", tileY, "]");
-        // Don't abort enter-world entirely — keep async enqueue and let warmup
-        // try again. Returning false here previously bounced players to login.
-        LOG_WARNING("Continuing with async tile stream after sync spawn-tile miss");
-    } else {
-        LOG_INFO("Spawn tile [", tileX, ",", tileY, "] loaded synchronously (",
-                 terrainManager->getLoadedTileCount(), " tiles, ",
-                 terrainRenderer->getChunkCount(), " chunks)");
-    }
-#endif
 
     terrainLoaded = true;
 

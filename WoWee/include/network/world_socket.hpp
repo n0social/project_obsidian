@@ -41,6 +41,14 @@ public:
     void disconnect() override;
     bool isConnected() const override;
 
+    const std::string& connectedHost() const { return connectedHost_; }
+    uint16_t connectedPort() const { return connectedPort_; }
+
+    /** Last TX/RX ages and opcodes for drop diagnostics (RetroWoW and Kronos). */
+    std::string describeLastTraffic() const;
+    /** Milliseconds since the last client packet, or -1 if none recorded. */
+    int64_t lastOutboundAgeMs() const;
+
     /**
      * Send a world packet
      * Automatically encrypts 6-byte header if encryption is enabled
@@ -74,6 +82,14 @@ public:
     void initEncryption(const std::vector<uint8_t>& sessionKey, uint32_t build = 12340);
 
     void tracePacketsFor(std::chrono::milliseconds duration, const std::string& reason);
+
+    /**
+     * Dispatch every queued SMSG_WARDEN_DATA plus stay-alive ACKs
+     * (FORCE_MOVE_ROOT/UNROOT, cinematic, speed changes) immediately.
+     * Safe to call from the Warden watchdog while the main thread is blocked
+     * in terrain/model loads.
+     */
+    void dispatchWardenCallbacks();
 
     /**
      * Check if header encryption is enabled
@@ -148,6 +164,9 @@ private:
         uint16_t payloadLen = 0;
     };
     std::deque<RecentPacketTrace> recentPacketHistory_;
+
+    std::string connectedHost_;
+    uint16_t connectedPort_ = 0;
 
     // Packet callback
     std::function<void(const Packet&)> packetCallback;

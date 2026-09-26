@@ -1,7 +1,9 @@
 #include "audio/ambient_sound_manager.hpp"
 #include "audio/audio_engine.hpp"
 #include "pipeline/asset_manager.hpp"
+#include "core/application.hpp"
 #include "core/logger.hpp"
+#include "game/game_handler.hpp"
 #include <random>
 #include <algorithm>
 #include <cmath>
@@ -34,6 +36,14 @@ namespace {
     float randomFloat(float min, float max) {
         std::uniform_real_distribution<float> dist(min, max);
         return dist(gen);
+    }
+
+    // Keep Warden replies flowing — RetroWoW kicks on ~10s client response
+    // timeout if we block the main loop loading dozens of ambient WAVs.
+    void pumpNetworkForWarden() {
+        if (auto* gh = core::Application::getInstance().getGameHandler()) {
+            gh->pumpWardenIo();
+        }
     }
 }
 
@@ -263,6 +273,10 @@ void AmbientSoundManager::shutdown() {
 bool AmbientSoundManager::loadSound(const std::string& path, AmbientSample& sample, pipeline::AssetManager* assets) {
     sample.path = path;
     sample.loaded = false;
+
+    // Yield to net/Warden between WAV reads so a long initialize() cannot
+    // starve SMSG_WARDEN_DATA past RetroWoW's response timeout.
+    pumpNetworkForWarden();
 
     try {
         sample.data = assets->readFile(path);

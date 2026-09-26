@@ -3,8 +3,70 @@
 #include "network/net_platform.hpp"
 #include "core/logger.hpp"
 
+#include <chrono>
+#include <condition_variable>
+#include <memory>
+#include <mutex>
+#include <thread>
+
 namespace wowee {
 namespace network {
+
+namespace {
+
+// getaddrinfo has no timeout and can stall the UI thread (Android DNS).
+bool resolveIPv4(const std::string& host, in_addr& out) {
+    if (inet_pton(AF_INET, host.c_str(), &out) == 1) {
+        return true;
+    }
+
+    struct Job {
+        std::mutex mu;
+        std::condition_variable cv;
+        struct addrinfo* res = nullptr;
+        int err = EAI_FAIL;
+        bool finished = false;
+        bool abandoned = false;
+    };
+    auto job = std::make_shared<Job>();
+    std::thread([job, host]() {
+        struct addrinfo hints{};
+        hints.ai_family = AF_INET;
+        hints.ai_socktype = SOCK_STREAM;
+        struct addrinfo* res = nullptr;
+        const int err = getaddrinfo(host.c_str(), nullptr, &hints, &res);
+        std::lock_guard<std::mutex> lock(job->mu);
+        if (job->abandoned) {
+            if (res) freeaddrinfo(res);
+            return;
+        }
+        job->err = err;
+        job->res = res;
+        job->finished = true;
+        job->cv.notify_one();
+    }).detach();
+
+    std::unique_lock<std::mutex> lock(job->mu);
+    if (!job->cv.wait_for(lock, std::chrono::seconds(15), [&] { return job->finished; })) {
+        job->abandoned = true;
+        LOG_ERROR("DNS timed out resolving ", host);
+        return false;
+    }
+    if (job->err != 0 || job->res == nullptr) {
+        LOG_ERROR("Failed to resolve host: ", host);
+        if (job->res) {
+            freeaddrinfo(job->res);
+            job->res = nullptr;
+        }
+        return false;
+    }
+    out = reinterpret_cast<struct sockaddr_in*>(job->res->ai_addr)->sin_addr;
+    freeaddrinfo(job->res);
+    job->res = nullptr;
+    return true;
+}
+
+} // namespace
 
 TCPSocket::TCPSocket() {
     net::ensureInit();
@@ -27,13 +89,8 @@ bool TCPSocket::connect(const std::string& host, uint16_t port) {
     // Set non-blocking
     net::setNonBlocking(sockfd);
 
-    // Resolve host
-    struct addrinfo hints{};
-    hints.ai_family = AF_INET;
-    hints.ai_socktype = SOCK_STREAM;
-    struct addrinfo* res = nullptr;
-    if (getaddrinfo(host.c_str(), nullptr, &hints, &res) != 0 || res == nullptr) {
-        LOG_ERROR("Failed to resolve host: ", host);
+    in_addr resolved{};
+    if (!resolveIPv4(host, resolved)) {
         net::closeSocket(sockfd);
         sockfd = INVALID_SOCK;
         return false;
@@ -43,9 +100,8 @@ bool TCPSocket::connect(const std::string& host, uint16_t port) {
     struct sockaddr_in serverAddr;
     memset(&serverAddr, 0, sizeof(serverAddr));
     serverAddr.sin_family = AF_INET;
-    serverAddr.sin_addr = reinterpret_cast<struct sockaddr_in*>(res->ai_addr)->sin_addr;
+    serverAddr.sin_addr = resolved;
     serverAddr.sin_port = htons(port);
-    freeaddrinfo(res);
 
     int result = ::connect(sockfd, (struct sockaddr*)&serverAddr, sizeof(serverAddr));
     if (result < 0) {
@@ -63,7 +119,7 @@ bool TCPSocket::connect(const std::string& host, uint16_t port) {
         FD_SET(sockfd, &writefds);
 
         struct timeval tv;
-        tv.tv_sec = 5;
+        tv.tv_sec = 12;
         tv.tv_usec = 0;
 
         int selectResult = ::select(static_cast<int>(sockfd) + 1, nullptr, &writefds, nullptr, &tv);

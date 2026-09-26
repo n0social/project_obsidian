@@ -72,6 +72,58 @@ set(WOWEE_ENABLE_AMD_FSR2 OFF CACHE BOOL "" FORCE)
 set(WOWEE_ENABLE_AMD_FSR3_FRAMEGEN OFF CACHE BOOL "" FORCE)
 set(WOWEE_BUILD_AMD_FSR3_RUNTIME OFF CACHE BOOL "" FORCE)
 
-# No local C++ sources here — the old GLES skeleton was removed.
-# libwowee.so is the only native library; SDLActivity loads it and calls SDL_main.
+# libwowee.so — game engine (SDL_main).
 add_subdirectory("${WOWEE_DIR}" "${CMAKE_BINARY_DIR}/wowee")
+
+# ---- On-device classic MPQ extract (StormLib + asset_extract) ----
+get_filename_component(OBSIDIAN_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/../../../../.." ABSOLUTE)
+set(STORMLIB_SRC "${OBSIDIAN_ROOT}/third_party/StormLib")
+if(NOT EXISTS "${STORMLIB_SRC}/CMakeLists.txt")
+    message(FATAL_ERROR
+        "StormLib missing at ${STORMLIB_SRC}. Clone:\n"
+        "  git clone --depth 1 --branch v9.30 https://github.com/ladislav-zezula/StormLib.git third_party/StormLib")
+endif()
+
+set(BUILD_SHARED_LIBS OFF CACHE BOOL "" FORCE)
+set(STORM_SKIP_INSTALL ON CACHE BOOL "" FORCE)
+set(STORM_BUILD_TESTS OFF CACHE BOOL "" FORCE)
+set(STORM_USE_BUNDLED_LIBRARIES ON CACHE BOOL "" FORCE)
+add_subdirectory("${STORMLIB_SRC}" "${CMAKE_BINARY_DIR}/stormlib")
+
+set(_EXTRACT_DIR "${WOWEE_DIR}/tools/asset_extract")
+if(NOT EXISTS "${_EXTRACT_DIR}/extractor.cpp")
+    message(FATAL_ERROR "WoWee asset_extract sources missing at ${_EXTRACT_DIR}")
+endif()
+
+add_library(obsidian_extract SHARED
+    obsidian_extract_jni.cpp
+    open_format_stubs.cpp
+    "${_EXTRACT_DIR}/extractor.cpp"
+    "${_EXTRACT_DIR}/path_mapper.cpp"
+    "${_EXTRACT_DIR}/manifest_writer.cpp"
+    "${WOWEE_DIR}/src/pipeline/dbc_loader.cpp"
+    "${WOWEE_DIR}/src/core/logger.cpp"
+)
+target_include_directories(obsidian_extract PRIVATE
+    "${WOWEE_DIR}/include"
+    "${WOWEE_DIR}/extern"
+    "${_EXTRACT_DIR}"
+    "${STORMLIB_SRC}/src"
+)
+target_compile_definitions(obsidian_extract PRIVATE
+    OBSIDIAN_ANDROID=1
+    STORMLIB_NO_AUTO_LINK=1
+)
+# Extractor uses C++17 filesystem; keep C++20 to match the rest of the project.
+target_compile_features(obsidian_extract PRIVATE cxx_std_20)
+target_link_libraries(obsidian_extract PRIVATE
+    storm
+    android
+    log
+)
+# Ensure AGP packages this .so into the APK.
+set_target_properties(obsidian_extract PROPERTIES
+    LIBRARY_OUTPUT_DIRECTORY "${CMAKE_LIBRARY_OUTPUT_DIRECTORY}"
+)
+
+message(STATUS "Obsidian: obsidian_extract (on-device MPQ) ENABLED")

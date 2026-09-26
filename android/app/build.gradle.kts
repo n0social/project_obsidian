@@ -72,6 +72,6 @@ android {
 }
 
 dependencies {
-    // SDLActivity + CrashReporter are framework APIs only.
-    // Keep Kotlin stdlib via the Android Kotlin plugin; no AppCompat UI.
+    // SAF folder pick for classic client / extracted Data import.
+    implementation("androidx.documentfile:documentfile:1.0.1")
 }

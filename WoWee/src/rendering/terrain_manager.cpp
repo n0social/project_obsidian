@@ -20,6 +20,8 @@
 #include "pipeline/wmo_loader.hpp"
 #include "pipeline/terrain_mesh.hpp"
 #include "core/logger.hpp"
+#include "core/application.hpp"
+#include "game/game_handler.hpp"
 #include <glm/gtc/matrix_transform.hpp>
 #include <glm/gtc/quaternion.hpp>
 #include <glm/gtx/euler_angles.hpp>
@@ -317,20 +319,33 @@ bool TerrainManager::loadTile(int x, int y) {
 
     LOG_INFO("Loading terrain tile [", x, ",", y, "] (synchronous)");
 
+    auto pumpWarden = []() {
+        if (auto* gh = core::Application::getInstance().getGameHandler()) {
+            gh->pumpWardenIo();
+        }
+    };
+    pumpWarden();
+
     auto pending = prepareTile(x, y);
     if (!pending) {
         failedTiles[coord] = true;
         return false;
     }
 
+    pumpWarden();
+
     VkContext* vkCtx = terrainRenderer ? terrainRenderer->getVkContext() : nullptr;
     if (vkCtx) vkCtx->beginUploadBatch();
 
     FinalizingTile ft;
     ft.pending = std::move(pending);
-    while (!advanceFinalization(ft)) {}
+    int finalizeSteps = 0;
+    while (!advanceFinalization(ft)) {
+        if ((++finalizeSteps % 4) == 0) pumpWarden();
+    }
 
     if (vkCtx) vkCtx->endUploadBatchSync();  // Sync — caller expects tile ready
+    pumpWarden();
     return true;
 }
 

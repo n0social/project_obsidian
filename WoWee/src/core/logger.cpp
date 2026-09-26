@@ -69,6 +69,20 @@ void Logger::ensureFile() {
     const char* logName = std::getenv("WOWEE_LOG_FILE");
     const std::string logPath =
         std::string("logs/") + ((logName && *logName) ? logName : "wowee.log");
+    // Rotate so a RetroWoW/Kronos A/B is not destroyed when Play relaunches.
+    if (!logName || !*logName) {
+        const std::filesystem::path cur(logPath);
+        const std::filesystem::path prev = cur.parent_path() / "wowee.prev.log";
+        const std::filesystem::path prev2 = cur.parent_path() / "wowee.prev2.log";
+        std::error_code rec;
+        if (std::filesystem::exists(cur, rec)) {
+            std::filesystem::remove(prev2, rec);
+            if (std::filesystem::exists(prev, rec)) {
+                std::filesystem::rename(prev, prev2, rec);
+            }
+            std::filesystem::rename(cur, prev, rec);
+        }
+    }
     fileStream.open(logPath, std::ios::out | std::ios::trunc);
     lastFlushTime_ = std::chrono::steady_clock::now();
 }

@@ -35,6 +35,7 @@
 #include "pipeline/dbc_loader.hpp"
 #include "core/logger.hpp"
 #include "game/protocol_constants.hpp"
+#include "game/warden_runtime.hpp"
 #include "rendering/animation/animation_ids.hpp"
 #include <glm/gtx/quaternion.hpp>
 #include <algorithm>
@@ -56,6 +57,9 @@
 #include <limits>
 #include <openssl/sha.h>
 #include <openssl/hmac.h>
+#include <thread>
+#include <mutex>
+#include <atomic>
 
 namespace wowee {
 namespace game {
@@ -77,6 +81,52 @@ const char* worldStateName(WorldState state) {
         case WorldState::FAILED: return "FAILED";
     }
     return "UNKNOWN";
+}
+
+std::thread gWardenWatchdog;
+std::atomic<bool> gWardenWatchdogStop{true};
+
+void writeSessionErrorFile(const std::string& message) {
+    const std::string root = core::getConfigRoot();
+    const char* names[] = {"last_world_error.txt"};
+    for (const char* name : names) {
+        std::ofstream out(root + "/" + name, std::ios::trunc);
+        if (out.is_open()) {
+            out << message << '\n';
+        }
+    }
+    // Durable copy next to wowee.log so Play cannot wipe the last Kronos/RetroWoW drop.
+    std::ofstream logCopy("logs/last_world_error.txt", std::ios::trunc);
+    if (logCopy.is_open()) {
+        logCopy << message << '\n';
+    }
+}
+
+void stopWardenWatchdogThread() {
+    gWardenWatchdogStop.store(true, std::memory_order_release);
+    if (!gWardenWatchdog.joinable()) {
+        return;
+    }
+    if (gWardenWatchdog.get_id() == std::this_thread::get_id()) {
+        gWardenWatchdog.detach();
+        return;
+    }
+    gWardenWatchdog.join();
+}
+
+void startWardenWatchdogThread(GameHandler* self) {
+    stopWardenWatchdogThread();
+    gWardenWatchdogStop.store(false, std::memory_order_release);
+    gWardenWatchdog = std::thread([self] {
+        while (!gWardenWatchdogStop.load(std::memory_order_acquire)) {
+            if (self) {
+                self->pumpWardenIo();
+            }
+            for (int i = 0; i < 5 && !gWardenWatchdogStop.load(std::memory_order_acquire); ++i) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(5));
+            }
+        }
+    });
 }
 
 } // end anonymous namespace
@@ -224,6 +274,8 @@ bool GameHandler::connect(const std::string& host,
 
     setState(WorldState::CONNECTED);
     LOG_INFO("Connected to world server, waiting for SMSG_AUTH_CHALLENGE...");
+    startWardenWatchdogThread(this);
+    LOG_INFO("Warden watchdog started (25ms cheat-check pump)");
 
     return true;
 }
@@ -250,6 +302,7 @@ void GameHandler::resetWardenState() {
 }
 
 void GameHandler::disconnect() {
+    stopWardenWatchdogThread();
     if (onTaxiFlight_) {
         taxiRecoverPending_ = true;
     } else {
@@ -266,7 +319,10 @@ void GameHandler::disconnect() {
     contacts_.clear();
     transportAttachments_.clear();
     resetWardenState();
-    pendingIncomingPackets_.clear();
+    {
+        std::lock_guard<std::mutex> qlock(wardenPacketQueueMutex());
+        pendingIncomingPackets_.clear();
+    }
     // Fire despawn callbacks so the renderer releases M2/character model resources.
     for (const auto& [guid, entity] : entityController_->getEntityManager().getEntities()) {
         if (guid == playerGuid) continue;
@@ -348,6 +404,11 @@ void GameHandler::updateNetworking(float deltaTime) {
         }
     }
 
+    // Warden stages chain quickly (SYSINFO → EndScene → integrity). After answering
+    // one scan the next often arrives within the same frame — pump again so we do
+    // not burn the server's client-response timeout during world-load stalls.
+    pumpWardenIo();
+
     // Drain async Warden responses + gate timers (handler owns the live RC4 state).
     if (wardenHandler_) {
         wardenHandler_->update(deltaTime);
@@ -374,7 +435,7 @@ void GameHandler::updateNetworking(float deltaTime) {
     }
 
     // Detect RX silence (server stopped sending packets but TCP still open)
-    if (isInWorld() && socket->isConnected() &&
+    if (isInWorld() && socket && socket->isConnected() &&
         lastRxTime_.time_since_epoch().count() > 0) {
         auto silenceMs = std::chrono::duration_cast<std::chrono::milliseconds>(
             std::chrono::steady_clock::now() - lastRxTime_).count();
@@ -388,15 +449,59 @@ void GameHandler::updateNetworking(float deltaTime) {
         }
     }
 
-    // Detect server-side disconnect (socket closed during update)
+    // Detect server-side disconnect (socket closed during update).
+    // Always dump — Kronos kept UPDATE_OBJECT/terrain queued after peer_closed,
+    // so the old queued==0 gate never wrote last_world_error.txt.
     if (socket && !socket->isConnected() && state != WorldState::DISCONNECTED) {
-        if (pendingIncomingPackets_.empty() && !entityController_->hasPendingUpdateObjectWork()) {
-            LOG_WARNING("Server closed connection in state: ", worldStateName(state));
-            disconnect();
-            return;
+        size_t queued = 0;
+        {
+            std::lock_guard<std::mutex> lock(wardenPacketQueueMutex());
+            queued = pendingIncomingPackets_.size();
         }
-        LOG_DEBUG("World socket closed with ", pendingIncomingPackets_.size(),
-                  " queued packet(s) and update-object batch(es) pending dispatch");
+        const bool pendingUO = entityController_ && entityController_->hasPendingUpdateObjectWork();
+        std::string reason = "[" + sessionDiagLabel() + "] ";
+        const std::string exchange = wardenHandler_
+            ? wardenHandler_->describeLastExchange()
+            : std::string("no Warden handler");
+        const std::string traffic = socket->describeLastTraffic();
+        const int64_t txSilenceMs = socket->lastOutboundAgeMs();
+        const bool txSilent = (txSilenceMs >= 2500);
+        if (wardenHandler_ && wardenHandler_->hasUnansweredHashRequest()) {
+            reason += "World dropped: Warden HASH_REQUEST was never answered (seed missing from .cr). ";
+        } else if (txSilent && wardenHandler_ && wardenHandler_->lastTxWasHashResult()
+                   && wardenHandler_->lastRxWasModuleInit()
+                   && wardenHandler_->lastCheatResultBytes() == 0) {
+            reason += "World dropped: client went silent after HASH_RESULT/MODULE_INIT with no CHEAT_CHECKS (cinematic/ROOT_ACK or load stall). ";
+        } else if (wardenHandler_ && wardenHandler_->lastTxWasHashResult()
+                   && wardenHandler_->lastRxWasModuleInit()
+                   && wardenHandler_->lastCheatResultBytes() == 0) {
+            reason += "World dropped after HASH_RESULT + MODULE_INIT with no CHEAT_CHECKS yet. ";
+        } else if (wardenHandler_ && wardenHandler_->hasUnansweredCheatCheck()) {
+            reason += "World dropped: Warden timeout. A cheat-check was still unanswered when the server closed. ";
+        } else if (wardenHandler_ && wardenHandler_->lastCheatResultBytes() > 0) {
+            reason += "World dropped after CHEAT_CHECKS_RESULT (server likely rejected the last MEM/PAGE reply). ";
+        } else if (wardenHandler_ && wardenHandler_->wardenGateSeen()) {
+            reason += "World dropped after Warden traffic. ";
+        } else {
+            reason += "World dropped before Warden started (network/VPN). ";
+        }
+        reason += exchange;
+        reason += " | ";
+        reason += traffic;
+        if (txSilenceMs >= 0) {
+            reason += " tx_silence_ms=";
+            reason += std::to_string(txSilenceMs);
+        }
+        reason += " queued_packets=";
+        reason += std::to_string(queued);
+        reason += " pending_update_object=";
+        reason += pendingUO ? "yes" : "no";
+        LOG_ERROR(reason);
+        writeSessionErrorFile(reason);
+        addUIError(reason);
+        addSystemChatMessage(reason);
+        disconnect();
+        return;
     }
 
     // Post-gate visibility: determine whether server goes silent or closes after Warden requirement.
@@ -407,6 +512,84 @@ void GameHandler::updateNetworking(float deltaTime) {
                      "s connected=", socket->isConnected() ? "yes" : "no",
                      " packetsAfterGate=", wardenPacketsAfterGate_);
             wardenGateNextStatusLog_ += game::WARDEN_GATE_LOG_INTERVAL_SEC;
+        }
+    }
+}
+
+std::string GameHandler::sessionDiagLabel() const {
+    const char* hostEnv = std::getenv("OBSIDIAN_REALM_HOST");
+    const char* portEnv = std::getenv("OBSIDIAN_REALM_PORT");
+    std::string host = (hostEnv && *hostEnv) ? hostEnv : "?";
+    std::string lower = host;
+    for (char& c : lower) {
+        c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+    }
+    std::string realm = host;
+    if (lower.find("retro-wow") != std::string::npos) {
+        realm = "RetroWoW";
+    } else if (lower.find("twinstar") != std::string::npos || lower.find("kronos") != std::string::npos) {
+        realm = "Kronos";
+    }
+    std::string out = realm;
+    out += " auth=";
+    out += host;
+    out += ":";
+    out += (portEnv && *portEnv) ? portEnv : "?";
+    if (socket) {
+        out += " world=";
+        out += socket->connectedHost().empty() ? "?" : socket->connectedHost();
+        out += ":";
+        out += std::to_string(socket->connectedPort());
+    }
+    if (!characters.empty() && playerGuid != 0) {
+        for (const auto& character : characters) {
+            if (character.guid == playerGuid) {
+                out += " char=";
+                out += character.name;
+                break;
+            }
+        }
+    }
+    return out;
+}
+
+void GameHandler::pumpWardenIo() {
+    // Blocking loads (terrain tiles, ambient WAV) can stall the frame for seconds.
+    // RetroWoW closes the peer if a CHEAT_CHECKS reply sits unanswered ~3–5s.
+    // MODULE_USE / HASH_REQUEST also time out — do not wait for wardenGateSeen().
+    if (inWardenPump_) return;
+    if (wardenPumpGuard().exchange(true, std::memory_order_acq_rel)) return;
+    inWardenPump_ = true;
+    struct ClearFlag {
+        bool& flag;
+        std::atomic<bool>& guard;
+        ~ClearFlag() {
+            flag = false;
+            guard.store(false, std::memory_order_release);
+        }
+    } clear{inWardenPump_, wardenPumpGuard()};
+
+    if (!socket || !socket->isConnected()) return;
+
+    socket->dispatchWardenCallbacks();
+    drainPendingWardenPackets();
+    if (wardenHandler_) {
+        wardenHandler_->drainPendingResponse();
+    }
+
+    // Blocking loads (ambient WAV, ADT, vkDeviceWaitIdle) stall GameHandler::update
+    // on the main thread. Kronos closed after ~5s of client TX silence even when
+    // the server was still sending MONSTER_MOVE. The watchdog calls this every
+    // 25ms — send a heartbeat if we have gone quiet.
+    if (state == WorldState::IN_WORLD && socket->isConnected()) {
+        const int64_t txAge = socket->lastOutboundAgeMs();
+        if (txAge >= 400) {
+            if (movementHandler_) {
+                sendMovement(Opcode::MSG_MOVE_HEARTBEAT);
+                movementHandler_->timeSinceLastMoveHeartbeatRef() = 0.0f;
+            } else {
+                sendPing();
+            }
         }
     }
 }

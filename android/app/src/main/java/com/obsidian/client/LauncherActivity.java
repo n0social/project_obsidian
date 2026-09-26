@@ -1,9 +1,11 @@
 package com.obsidian.client;
 
 import android.app.Activity;
+import android.app.AlertDialog;
 import android.content.Intent;
 import android.content.SharedPreferences;
 import android.content.pm.ActivityInfo;
+import android.net.Uri;
 import android.os.Build;
 import android.os.Bundle;
 import android.text.InputType;
@@ -16,21 +18,27 @@ import android.widget.ArrayAdapter;
 import android.widget.Button;
 import android.widget.CheckBox;
 import android.widget.EditText;
+import android.widget.ProgressBar;
 import android.widget.SeekBar;
 import android.widget.Spinner;
 import android.widget.TextView;
+import android.util.Log;
 import android.widget.Toast;
 import android.widget.ViewFlipper;
 
 import java.io.File;
 import java.io.FileInputStream;
 import java.nio.charset.StandardCharsets;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * Single landscape Obsidian shell: settings + Sign in. No separate vertical login activity.
  */
 public class LauncherActivity extends Activity {
     public static final String EXTRA_OPEN_SIGNIN = "open_signin";
+    private static final String TAG = "Obsidian";
 
     private static final int PAGE_HOME = 0;
     private static final int PAGE_SIGNIN = 1;
@@ -39,6 +47,9 @@ public class LauncherActivity extends Activity {
     private static final int PAGE_CONTROLS = 4;
     private static final int PAGE_PATHS = 5;
     private static final int PAGE_ABOUT = 6;
+
+    private static final int REQ_PICK_CLIENT = 4101;
+    private static final int REQ_IMPORT_EXTRACTED = 4102;
 
     private SharedPreferences prefs;
     private ViewFlipper flipper;
@@ -50,6 +61,11 @@ public class LauncherActivity extends Activity {
     private EditText signinUser;
     private EditText signinPass;
     private TextView signinStatus;
+
+    private ProgressBar pathsProgress;
+    private TextView pathsProgressLabel;
+    private final AtomicBoolean importCancelled = new AtomicBoolean(false);
+    private final ExecutorService importExecutor = Executors.newSingleThreadExecutor();
 
     @Override
     protected void onCreate(Bundle savedInstanceState) {
@@ -78,8 +94,6 @@ public class LauncherActivity extends Activity {
         }
 
         findViewById(R.id.btn_play).setOnClickListener(v -> playFromLauncher());
-        findViewById(R.id.home_open_graphics).setOnClickListener(v -> showPage(PAGE_GRAPHICS));
-        findViewById(R.id.home_open_paths).setOnClickListener(v -> showPage(PAGE_SIGNIN));
 
         bindGraphics();
         bindAudio();
@@ -130,19 +144,12 @@ public class LauncherActivity extends Activity {
         signinStatus = findViewById(R.id.signin_status);
         CheckBox showPassword = findViewById(R.id.signin_show_password);
 
-        signinHost.setText(prefs.getString(ObsidianSettings.KEY_REALM_HOST, "logon.retro-wow.org"));
+        String savedHost = LauncherActivity.sanitizeHost(
+                prefs.getString(ObsidianSettings.KEY_REALM_HOST, ""));
+        signinHost.setText(savedHost);
         signinPort.setText(Integer.toString(prefs.getInt(ObsidianSettings.KEY_REALM_PORT, 3724)));
         signinUser.setText(prefs.getString(ObsidianSettings.KEY_ACCOUNT_USER, ""));
         signinPass.setText(prefs.getString(ObsidianSettings.KEY_ACCOUNT_PASS, ""));
-
-        findViewById(R.id.signin_preset_retro).setOnClickListener(v -> {
-            signinHost.setText("logon.retro-wow.org");
-            signinPort.setText("3724");
-        });
-        findViewById(R.id.signin_preset_twinstar).setOnClickListener(v -> {
-            signinHost.setText("login.twinstar-wow.com");
-            signinPort.setText("3724");
-        });
 
         showPassword.setOnCheckedChangeListener((buttonView, isChecked) -> {
             int type = isChecked
@@ -153,37 +160,66 @@ public class LauncherActivity extends Activity {
         });
     }
 
+    private ArrayAdapter<String> darkSpinnerAdapter(String[] items) {
+        ArrayAdapter<String> adapter = new ArrayAdapter<>(this, R.layout.spinner_item, items);
+        adapter.setDropDownViewResource(R.layout.spinner_dropdown_item);
+        return adapter;
+    }
+
     /** Single entry into the client — saves Sign in fields, then boots WoWee. */
     private void playFromLauncher() {
         // Ensure Sign-in widgets exist even if user never opened that page.
         if (signinHost == null) bindSignIn();
+        if (signinHost == null || signinUser == null || signinPass == null || signinPort == null) {
+            Toast.makeText(this, "Sign in is not ready. Reopen the app and try again.", Toast.LENGTH_LONG).show();
+            return;
+        }
 
-        String hostValue = sanitizeHost(signinHost.getText().toString());
+        final String hostValue = sanitizeHost(signinHost.getText().toString());
         signinHost.setText(hostValue);
-        String userValue = signinUser.getText().toString().trim();
-        String passValue = signinPass.getText().toString();
-        int portValue = 3724;
+        final String userValue = signinUser.getText().toString().trim();
+        final String passValue = signinPass.getText().toString();
+        int parsedPort = 3724;
         try {
-            portValue = Integer.parseInt(signinPort.getText().toString().trim());
+            parsedPort = Integer.parseInt(signinPort.getText().toString().trim());
         } catch (NumberFormatException ignored) {
         }
-        if (portValue < 1 || portValue > 65535) portValue = 3724;
+        if (parsedPort < 1 || parsedPort > 65535) parsedPort = 3724;
+        final int portValue = parsedPort;
 
-        if (hostValue.isEmpty() || hostValue.endsWith(".rg")
-                || userValue.isEmpty() || passValue.isEmpty()) {
+        if (hostValue.isEmpty() || userValue.isEmpty() || passValue.isEmpty()) {
             showPage(PAGE_SIGNIN);
             if (hostValue.isEmpty()) {
-                showSignInError("Enter a realm hostname (RetroWoW: logon.retro-wow.org).");
-            } else if (hostValue.endsWith(".rg")) {
-                showSignInError("Hostname ends in .rg — RetroWoW uses .org (logon.retro-wow.org).");
+                showSignInError("Enter your realm hostname, then Enter World.");
             } else if (userValue.isEmpty()) {
-                showSignInError("Enter your account username, then press Play.");
+                showSignInError("Enter your account username, then Enter World.");
             } else {
-                showSignInError("Enter your account password, then press Play.");
+                showSignInError("Enter your account password, then Enter World.");
             }
             return;
         }
 
+        if (!hasManifest(dataDirectory())) {
+            showPage(PAGE_PATHS);
+            Toast.makeText(this,
+                    "Classic Data missing. Data → extract your WoW client folder, or import extracted Data.",
+                    Toast.LENGTH_LONG).show();
+            refreshPathsStatus();
+            return;
+        }
+
+        new AlertDialog.Builder(this)
+                .setTitle("Enter World")
+                .setMessage("Log into:\n"
+                        + hostValue + ":" + portValue + "\n\n"
+                        + "Account: " + userValue)
+                .setPositiveButton("Enter World", (d, w) ->
+                        launchGame(hostValue, portValue, userValue, passValue))
+                .setNegativeButton("Cancel", null)
+                .show();
+    }
+
+    private void launchGame(String hostValue, int portValue, String userValue, String passValue) {
         prefs.edit()
                 .putString(ObsidianSettings.KEY_REALM_HOST, hostValue)
                 .putInt(ObsidianSettings.KEY_REALM_PORT, portValue)
@@ -200,15 +236,18 @@ public class LauncherActivity extends Activity {
             return;
         }
 
+        rotateWoweeLogs();
         clearAuthErrorFile();
         if (signinStatus != null) signinStatus.setVisibility(View.GONE);
+        Log.i(TAG, "Play standing realmlist=" + hostValue + ":" + portValue
+                + " user=" + userValue);
 
         Intent intent = new Intent(this, MainActivity.class);
         intent.putExtra(MainActivity.EXTRA_AUTO_LOGIN, true);
         startActivity(intent);
     }
 
-    /** Normalize pasted realmlist lines and common RetroWoW typos. */
+    /** Normalize a pasted realmlist line down to a hostname. */
     static String sanitizeHost(String raw) {
         String cleaned = raw == null ? "" : raw.trim();
         String lower = cleaned.toLowerCase();
@@ -233,19 +272,16 @@ public class LauncherActivity extends Activity {
             }
             if (digits) {
                 cleaned = cleaned.substring(0, colon);
-                lower = cleaned.toLowerCase();
             }
-        }
-        // Common mistype: logon.retro-wow.rg → .org
-        if (lower.equals("logon.retro-wow.rg") || lower.equals("logon.retro-wow.com")) {
-            cleaned = "logon.retro-wow.org";
         }
         return cleaned;
     }
 
     private void showSignInError(String message) {
-        signinStatus.setText(message);
-        signinStatus.setVisibility(View.VISIBLE);
+        if (signinStatus != null) {
+            signinStatus.setText(message);
+            signinStatus.setVisibility(View.VISIBLE);
+        }
         Toast.makeText(this, message, Toast.LENGTH_LONG).show();
     }
 
@@ -264,9 +300,45 @@ public class LauncherActivity extends Activity {
         return new File(ObsidianSettings.configDir(this), "last_auth_error.txt");
     }
 
+    private File worldErrorFile() {
+        return new File(ObsidianSettings.configDir(this), "last_world_error.txt");
+    }
+
+    private File durableWorldErrorFile() {
+        File logs = getExternalFilesDir(null);
+        if (logs == null) return null;
+        return new File(new File(logs, "logs"), "last_world_error.txt");
+    }
+
+    /** Keep the last two wowee.log sessions so a new Play does not wipe the previous one. */
+    private void rotateWoweeLogs() {
+        File logs = new File(getExternalFilesDir(null), "logs");
+        if (logs == null) return;
+        File current = new File(logs, "wowee.log");
+        if (!current.isFile()) return;
+        File prev = new File(logs, "wowee.prev.log");
+        File prev2 = new File(logs, "wowee.prev2.log");
+        if (prev2.exists() && !prev2.delete()) {
+            Log.w(TAG, "Could not delete wowee.prev2.log");
+        }
+        if (prev.exists() && !prev.renameTo(prev2)) {
+            Log.w(TAG, "Could not rotate wowee.prev.log");
+        }
+        if (!current.renameTo(prev)) {
+            Log.w(TAG, "Could not rotate wowee.log to wowee.prev.log");
+        }
+    }
+
     private String readAuthErrorFile() {
-        File file = authErrorFile();
-        if (!file.isFile()) return "";
+        String auth = readTrimmedFile(authErrorFile());
+        if (!auth.isEmpty()) return auth;
+        String world = readTrimmedFile(worldErrorFile());
+        if (!world.isEmpty()) return world;
+        return readTrimmedFile(durableWorldErrorFile());
+    }
+
+    private String readTrimmedFile(File file) {
+        if (file == null || !file.isFile()) return "";
         try (FileInputStream in = new FileInputStream(file)) {
             byte[] buf = new byte[(int) Math.min(file.length(), 2048)];
             int n = in.read(buf);
@@ -280,11 +352,19 @@ public class LauncherActivity extends Activity {
     private void clearAuthErrorFile() {
         //noinspection ResultOfMethodCallIgnored
         authErrorFile().delete();
+        //noinspection ResultOfMethodCallIgnored
+        worldErrorFile().delete();
+        File durable = durableWorldErrorFile();
+        if (durable != null) {
+            //noinspection ResultOfMethodCallIgnored
+            durable.delete();
+        }
     }
 
     private void bindGraphics() {
         Spinner preset = findViewById(R.id.gfx_preset);
         Spinner aa = findViewById(R.id.gfx_aa);
+        Spinner texQ = findViewById(R.id.gfx_texture_quality);
         CheckBox shadows = findViewById(R.id.gfx_shadows);
         CheckBox fxaa = findViewById(R.id.gfx_fxaa);
         CheckBox normal = findViewById(R.id.gfx_normal_mapping);
@@ -298,19 +378,17 @@ public class LauncherActivity extends Activity {
         TextView shadowLabel = findViewById(R.id.gfx_shadow_distance_value);
         TextView clutterLabel = findViewById(R.id.gfx_clutter_value);
 
-        ArrayAdapter<String> presetAdapter = new ArrayAdapter<>(
-                this, android.R.layout.simple_spinner_dropdown_item,
-                new String[] {"Custom", "Low", "Medium", "High", "Ultra"});
-        preset.setAdapter(presetAdapter);
-        ArrayAdapter<String> aaAdapter = new ArrayAdapter<>(
-                this, android.R.layout.simple_spinner_dropdown_item,
-                new String[] {"Off", "2x", "4x", "8x"});
-        aa.setAdapter(aaAdapter);
+        preset.setAdapter(darkSpinnerAdapter(
+                new String[] {"Custom", "Low", "Medium", "High", "Ultra"}));
+        aa.setAdapter(darkSpinnerAdapter(new String[] {"Off", "2x", "4x", "8x"}));
+        texQ.setAdapter(darkSpinnerAdapter(
+                new String[] {"Full", "High (1024)", "Medium (512)", "Low (256)"}));
 
         Runnable applyUiFromPrefs = () -> {
             suppressPresetCallback = true;
             preset.setSelection(clamp(prefs.getInt(ObsidianSettings.KEY_PRESET, 2), 0, 4));
             aa.setSelection(clamp(prefs.getInt(ObsidianSettings.KEY_AA, 0), 0, 3));
+            texQ.setSelection(clamp(prefs.getInt(ObsidianSettings.KEY_TEXTURE_QUALITY, 2), 0, 3));
             shadows.setChecked(prefs.getBoolean(ObsidianSettings.KEY_SHADOWS, true));
             fxaa.setChecked(prefs.getBoolean(ObsidianSettings.KEY_FXAA, false));
             normal.setChecked(prefs.getBoolean(ObsidianSettings.KEY_NORMAL, true));
@@ -346,6 +424,14 @@ public class LauncherActivity extends Activity {
             @Override public void onItemSelected(AdapterView<?> parent, View view1, int position, long id) {
                 if (suppressPresetCallback) return;
                 prefs.edit().putInt(ObsidianSettings.KEY_AA, position)
+                        .putInt(ObsidianSettings.KEY_PRESET, 0).apply();
+            }
+            @Override public void onNothingSelected(AdapterView<?> parent) {}
+        });
+        texQ.setOnItemSelectedListener(new AdapterView.OnItemSelectedListener() {
+            @Override public void onItemSelected(AdapterView<?> parent, View view1, int position, long id) {
+                if (suppressPresetCallback) return;
+                prefs.edit().putInt(ObsidianSettings.KEY_TEXTURE_QUALITY, position)
                         .putInt(ObsidianSettings.KEY_PRESET, 0).apply();
             }
             @Override public void onNothingSelected(AdapterView<?> parent) {}
@@ -426,10 +512,8 @@ public class LauncherActivity extends Activity {
         relative.setChecked(prefs.getBoolean(ObsidianSettings.KEY_RELATIVE_MOUSE, false));
         keepOn.setChecked(prefs.getBoolean(ObsidianSettings.KEY_KEEP_SCREEN_ON, true));
 
-        ArrayAdapter<String> adapter = new ArrayAdapter<>(
-                this, android.R.layout.simple_spinner_dropdown_item,
-                new String[] {"Landscape (locked)", "Sensor landscape"});
-        orientation.setAdapter(adapter);
+        orientation.setAdapter(darkSpinnerAdapter(
+                new String[] {"Landscape (locked)", "Sensor landscape"}));
         String current = prefs.getString(ObsidianSettings.KEY_ORIENTATION, "landscape");
         orientation.setSelection("sensorLandscape".equals(current) ? 1 : 0);
 
@@ -448,13 +532,102 @@ public class LauncherActivity extends Activity {
 
     private void bindPaths() {
         TextView dataDir = findViewById(R.id.paths_data_dir);
+        pathsProgress = findViewById(R.id.paths_progress);
+        pathsProgressLabel = findViewById(R.id.paths_progress_label);
         File data = dataDirectory();
         dataDir.setText(data.getAbsolutePath());
+
+        findViewById(R.id.paths_pick_client).setOnClickListener(v ->
+                openFolderPicker(REQ_PICK_CLIENT));
+        findViewById(R.id.paths_import_extracted).setOnClickListener(v ->
+                openFolderPicker(REQ_IMPORT_EXTRACTED));
+        findViewById(R.id.paths_cancel).setOnClickListener(v -> {
+            importCancelled.set(true);
+            updateImportProgress(pathsProgress != null ? pathsProgress.getProgress() : 0,
+                    "Cancelling…");
+        });
         refreshPathsStatus();
+    }
+
+    private void openFolderPicker(int requestCode) {
+        Intent intent = new Intent(Intent.ACTION_OPEN_DOCUMENT_TREE);
+        intent.addFlags(Intent.FLAG_GRANT_READ_URI_PERMISSION
+                | Intent.FLAG_GRANT_PERSISTABLE_URI_PERMISSION);
+        try {
+            startActivityForResult(intent, requestCode);
+        } catch (Exception e) {
+            Toast.makeText(this, "Folder picker unavailable: " + e.getMessage(), Toast.LENGTH_LONG).show();
+        }
+    }
+
+    @Override
+    protected void onActivityResult(int requestCode, int resultCode, Intent data) {
+        super.onActivityResult(requestCode, resultCode, data);
+        if (resultCode != RESULT_OK || data == null || data.getData() == null) return;
+        if (requestCode != REQ_PICK_CLIENT && requestCode != REQ_IMPORT_EXTRACTED) return;
+
+        Uri tree = data.getData();
+        try {
+            getContentResolver().takePersistableUriPermission(
+                    tree, Intent.FLAG_GRANT_READ_URI_PERMISSION);
+        } catch (SecurityException ignored) {
+        }
+
+        final boolean expectExtracted = requestCode == REQ_IMPORT_EXTRACTED;
+        importCancelled.set(false);
+        setImportUiBusy(true, expectExtracted
+                ? "Importing extracted Data…"
+                : "Copying MPQs, then running the built-in extractor…");
+
+        importExecutor.execute(() -> {
+            ClientDataImporter.Result result = ClientDataImporter.importTreeUri(
+                    this, tree, expectExtracted, importCancelled,
+                    (pct, msg) -> runOnUiThread(() -> updateImportProgress(pct, msg)));
+            runOnUiThread(() -> {
+                setImportUiBusy(false, result.message);
+                refreshHome();
+                refreshPathsStatus();
+                Toast.makeText(this, result.message, Toast.LENGTH_LONG).show();
+                if (result.success) {
+                    showPage(PAGE_SIGNIN);
+                }
+            });
+        });
+    }
+
+    private void setImportUiBusy(boolean busy, String message) {
+        if (pathsProgress != null) {
+            pathsProgress.setVisibility(View.VISIBLE);
+            pathsProgress.setIndeterminate(busy);
+            if (!busy) pathsProgress.setProgress(100);
+        }
+        if (pathsProgressLabel != null) {
+            pathsProgressLabel.setVisibility(View.VISIBLE);
+            pathsProgressLabel.setText(message != null ? message : "");
+        }
+        View pick = findViewById(R.id.paths_pick_client);
+        View imp = findViewById(R.id.paths_import_extracted);
+        View cancel = findViewById(R.id.paths_cancel);
+        if (pick != null) pick.setEnabled(!busy);
+        if (imp != null) imp.setEnabled(!busy);
+        if (cancel != null) cancel.setVisibility(busy ? View.VISIBLE : View.GONE);
+    }
+
+    private void updateImportProgress(int percent, String message) {
+        if (pathsProgress != null) {
+            pathsProgress.setVisibility(View.VISIBLE);
+            pathsProgress.setIndeterminate(false);
+            pathsProgress.setProgress(Math.max(0, Math.min(100, percent)));
+        }
+        if (pathsProgressLabel != null) {
+            pathsProgressLabel.setVisibility(View.VISIBLE);
+            pathsProgressLabel.setText(message != null ? message : "");
+        }
     }
 
     private void bindAbout() {
         TextView version = findViewById(R.id.about_version);
+        if (version == null) return;
         version.setText(BuildConfig.ENGINE_NAME + " " + BuildConfig.VERSION_NAME
                 + " (" + BuildConfig.VERSION_CODE + ")");
     }
@@ -463,17 +636,29 @@ public class LauncherActivity extends Activity {
         TextView device = findViewById(R.id.home_device_line);
         TextView dataLine = findViewById(R.id.home_data_line);
         TextView hint = findViewById(R.id.home_hint_line);
-        device.setText(ObsidianSettings.describeDevice());
+        if (device != null) device.setText(ObsidianSettings.describeDevice());
 
         File data = dataDirectory();
         boolean ok = hasManifest(data);
-        dataLine.setText(ok
-                ? "Classic Data found under expansions/classic."
-                : "Classic Data missing — push extracted assets before Play.");
-        dataLine.setTextColor(getColor(ok ? R.color.obs_ok : R.color.obs_danger));
-        hint.setText(ok
-                ? "Ready. Fill Sign in if needed, then press Play."
-                : "Use scripts/push-game-data.ps1 -Full from your PC.");
+        if (dataLine != null) {
+            dataLine.setText(ok
+                    ? "Classic Data found under expansions/classic."
+                    : "Classic Data missing. Add it under Data.");
+            dataLine.setTextColor(getColor(ok ? R.color.obs_ok : R.color.obs_danger));
+        }
+        TextView realmLine = findViewById(R.id.home_realm_line);
+        String host = sanitizeHost(prefs.getString(ObsidianSettings.KEY_REALM_HOST, ""));
+        int port = prefs.getInt(ObsidianSettings.KEY_REALM_PORT, 3724);
+        if (realmLine != null) {
+            realmLine.setText(host.isEmpty()
+                    ? "No realm host yet. Set it under Sign in."
+                    : "Enter World will use " + host + ":" + port);
+        }
+        if (hint != null) {
+            hint.setText(ok
+                    ? "Sign in with your server, then Enter World."
+                    : "Data → add your 1.12.1 client, then Sign in.");
+        }
     }
 
     private void refreshPathsStatus() {
@@ -483,19 +668,23 @@ public class LauncherActivity extends Activity {
         boolean ok = hasManifest(data);
         status.setText(ok
                 ? "manifest.json detected — client can boot."
-                : "No manifest.json yet. Expected under Data/ or Data/expansions/classic/.");
+                : "No manifest.json yet. Step 1: extract a 1.12.1 client folder, or step 2: import an extracted tree.");
         status.setTextColor(getColor(ok ? R.color.obs_ok : R.color.obs_danger));
+        TextView extractor = findViewById(R.id.paths_extractor_status);
+        if (extractor != null) {
+            extractor.setText(NativeExtract.isAvailable()
+                    ? "Built-in extractor: ready"
+                    : "Built-in extractor: unavailable in this APK — use Import extracted Data.");
+            extractor.setTextColor(getColor(NativeExtract.isAvailable() ? R.color.obs_ok : R.color.obs_danger));
+        }
     }
 
     private File dataDirectory() {
-        File base = getExternalFilesDir(null);
-        if (base == null) base = getFilesDir();
-        return new File(base, "Data");
+        return ClientDataImporter.dataDirectory(this);
     }
 
     private boolean hasManifest(File data) {
-        return new File(data, "manifest.json").isFile()
-                || new File(data, "expansions/classic/manifest.json").isFile();
+        return ClientDataImporter.hasManifest(data);
     }
 
     private void hideSystemUi() {

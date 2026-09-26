@@ -393,16 +393,23 @@ void AuthScreen::render(auth::AuthHandler& authHandler) {
         if (std::strlen(username) == 0 || std::strlen(password) == 0 || std::strlen(hostname) == 0) {
             setStatus("Missing account details from Obsidian login screen", true);
         } else {
-            attemptAuth(authHandler);
+            androidConnectDeferred_ = true;
+            std::stringstream pending;
+            pending << "Connecting to " << hostname << ":" << port << "...";
+            setStatus(pending.str(), false);
         }
+    } else if (androidConnectDeferred_ && !androidAuthExitRequested_ && !statusIsError) {
+        androidConnectDeferred_ = false;
+        attemptAuth(authHandler);
     }
 
     // Dark clear only — no ImGui login widgets while connecting.
     {
         ImDrawList* bg = ImGui::GetBackgroundDrawList();
         bg->AddRectFilled(ImVec2(0, 0), screen, IM_COL32(18, 20, 26, 255));
-        const char* label = authenticating ? "Connecting..."
-            : (statusIsError ? statusMessage.c_str() : "Starting...");
+        const char* label = !statusMessage.empty()
+            ? statusMessage.c_str()
+            : (authenticating ? "Connecting..." : "Starting...");
         ImVec2 size = ImGui::CalcTextSize(label);
         bg->AddText(ImVec2((screen.x - size.x) * 0.5f, (screen.y - size.y) * 0.5f),
                     IM_COL32(242, 244, 248, 220), label);

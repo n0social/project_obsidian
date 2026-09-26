@@ -62,6 +62,13 @@ public:
     static BLPImage load(const std::vector<uint8_t>& blpData);
 
     /**
+     * Downsample RGBA8 mip0 so the longest edge is <= maxDim.
+     * Safe memory win for mobile: softer textures, intact mesh geometry.
+     * No-op when maxDim <= 0 or image already fits.
+     */
+    static void downsampleToMaxDim(BLPImage& image, int maxDim);
+
+    /**
      * Get format name for debugging
      */
     static const char* getFormatName(BLPFormat format);

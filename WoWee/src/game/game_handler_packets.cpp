@@ -11,6 +11,7 @@
 #include "game/social_handler.hpp"
 #include "game/quest_handler.hpp"
 #include "game/warden_handler.hpp"
+#include "game/warden_runtime.hpp"
 #include "game/packet_parsers.hpp"
 #include "game/transport_manager.hpp"
 #include "game/warden_crypto.hpp"
@@ -56,6 +57,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <limits>
+#include <mutex>
 #include <openssl/sha.h>
 #include <openssl/hmac.h>
 
@@ -923,9 +925,14 @@ void GameHandler::registerOpcodeHandlers() {
     // SMSG_CHAT_SERVER_MESSAGE — moved to ChatHandler::registerOpcodes
     // SMSG_AREA_TRIGGER_MESSAGE — moved to ChatHandler::registerOpcodes
     dispatchTable_[Opcode::SMSG_TRIGGER_CINEMATIC] = [this](network::Packet& packet) {
+        uint32_t cinematicId = packet.hasRemaining(4) ? packet.readUInt32() : 0;
         packet.skipAll();
-        network::Packet ack(wireOpcode(Opcode::CMSG_NEXT_CINEMATIC_CAMERA));
-        socket->send(ack);
+        LOG_WARNING("SMSG_TRIGGER_CINEMATIC id=", cinematicId, " — skipping intro (NEXT + COMPLETE)");
+        network::Packet next(wireOpcode(Opcode::CMSG_NEXT_CINEMATIC_CAMERA));
+        socket->send(next);
+        network::Packet done(wireOpcode(Opcode::CMSG_COMPLETE_CINEMATIC));
+        socket->send(done);
+        LOG_WARNING("Sent CMSG_NEXT_CINEMATIC_CAMERA + CMSG_COMPLETE_CINEMATIC");
     };
 
     // ---- Batch 5: Teleport, taxi, BG, LFG, arena, movement relay, mail, bank, auction, quests ----
@@ -2963,18 +2970,25 @@ void GameHandler::handlePacket(network::Packet& packet) {
 }
 
 void GameHandler::enqueueIncomingPacket(const network::Packet& packet) {
-    if (pendingIncomingPackets_.size() >= kMaxQueuedInboundPackets) {
-        LOG_ERROR("Inbound packet queue overflow (", pendingIncomingPackets_.size(),
-                  " packets); dropping oldest packet to preserve responsiveness");
-        pendingIncomingPackets_.pop_front();
+    {
+        std::lock_guard<std::mutex> lock(wardenPacketQueueMutex());
+        if (pendingIncomingPackets_.size() >= kMaxQueuedInboundPackets) {
+            LOG_ERROR("Inbound packet queue overflow (", pendingIncomingPackets_.size(),
+                      " packets); dropping oldest packet to preserve responsiveness");
+            pendingIncomingPackets_.pop_front();
+        }
+        // Always append. drainPendingWardenPackets() pulls every 0x2E6 out
+        // regardless of position; push_front reversed HASH-era cheat-checks
+        // and desynced RC4 (unknown opcodes 0x61/0x5A then peer_closed).
+        pendingIncomingPackets_.push_back(packet);
     }
-    pendingIncomingPackets_.push_back(packet);
     lastRxTime_ = std::chrono::steady_clock::now();
     rxSilenceLogged_ = false;
     rxSilence15sLogged_ = false;
 }
 
 void GameHandler::enqueueIncomingPacketFront(network::Packet&& packet) {
+    std::lock_guard<std::mutex> lock(wardenPacketQueueMutex());
     if (pendingIncomingPackets_.size() >= kMaxQueuedInboundPackets) {
         LOG_ERROR("Inbound packet queue overflow while prepending (", pendingIncomingPackets_.size(),
                   " packets); dropping newest queued packet to preserve ordering");
@@ -2985,10 +2999,61 @@ void GameHandler::enqueueIncomingPacketFront(network::Packet&& packet) {
 
 // enqueueUpdateObjectWork and processPendingUpdateObjectWork moved to EntityController
 
+void GameHandler::drainPendingWardenPackets() {
+    std::lock_guard<std::recursive_mutex> order(wardenDispatchMutex());
+    std::deque<network::Packet> warden;
+    {
+        std::lock_guard<std::mutex> lock(wardenPacketQueueMutex());
+        if (pendingIncomingPackets_.empty()) return;
+
+        bool anyWarden = false;
+        for (const auto& packet : pendingIncomingPackets_) {
+            if (packet.getOpcode() == 0x2E6) {
+                anyWarden = true;
+                break;
+            }
+        }
+        if (!anyWarden) return;
+
+        std::deque<network::Packet> deferred;
+        while (!pendingIncomingPackets_.empty()) {
+            network::Packet packet = std::move(pendingIncomingPackets_.front());
+            pendingIncomingPackets_.pop_front();
+            const uint16_t wireOp = packet.getOpcode();
+            const auto logicalOp = opcodeTable_.fromWire(wireOp);
+            const bool isWarden =
+                wireOp == 0x2E6 ||
+                (logicalOp && *logicalOp == Opcode::SMSG_WARDEN_DATA);
+            if (isWarden) {
+                warden.push_back(std::move(packet));
+            } else {
+                deferred.push_back(std::move(packet));
+            }
+        }
+        pendingIncomingPackets_ = std::move(deferred);
+    }
+
+    for (auto& packet : warden) {
+        handlePacket(packet);
+        if (wardenHandler_) {
+            wardenHandler_->drainPendingResponse();
+        }
+    }
+}
+
 void GameHandler::processQueuedIncomingPackets() {
-    if (pendingIncomingPackets_.empty() && !entityController_->hasPendingUpdateObjectWork()) {
+    bool queueEmpty = false;
+    {
+        std::lock_guard<std::mutex> lock(wardenPacketQueueMutex());
+        queueEmpty = pendingIncomingPackets_.empty();
+    }
+    if (queueEmpty && !entityController_->hasPendingUpdateObjectWork()) {
         return;
     }
+
+    // Warden replies are time-critical — RetroWoW peer-closes if we sit on
+    // SMSG_WARDEN_DATA while UpdateObject work burns the packet budget.
+    drainPendingWardenPackets();
 
     const int maxPacketsThisUpdate = incomingPacketsBudgetPerUpdate(state);
     const float budgetMs = incomingPacketBudgetMs(state);
@@ -3010,12 +3075,20 @@ void GameHandler::processQueuedIncomingPackets() {
             continue;
         }
 
-        if (pendingIncomingPackets_.empty()) {
-            break;
+        network::Packet packet;
+        {
+            std::lock_guard<std::mutex> lock(wardenPacketQueueMutex());
+            if (pendingIncomingPackets_.empty()) {
+                break;
+            }
+            packet = std::move(pendingIncomingPackets_.front());
+            pendingIncomingPackets_.pop_front();
         }
-
-        network::Packet packet = std::move(pendingIncomingPackets_.front());
-        pendingIncomingPackets_.pop_front();
+        if (packet.getOpcode() == 0x2E6) {
+            enqueueIncomingPacket(packet);
+            drainPendingWardenPackets();
+            continue;
+        }
         const uint16_t wireOp = packet.getOpcode();
         const auto logicalOp = opcodeTable_.fromWire(wireOp);
         auto packetHandleStart = std::chrono::steady_clock::now();
@@ -3039,13 +3112,17 @@ void GameHandler::processQueuedIncomingPackets() {
         return;
     }
 
-    if (!pendingIncomingPackets_.empty()) {
+    size_t remaining = 0;
+    {
+        std::lock_guard<std::mutex> lock(wardenPacketQueueMutex());
+        remaining = pendingIncomingPackets_.size();
+    }
+    if (remaining > 0) {
         LOG_DEBUG("GameHandler packet budget reached (processed=", processed,
-                  ", remaining=", pendingIncomingPackets_.size(),
+                  ", remaining=", remaining,
                   ", state=", worldStateName(state), ")");
     }
 }
-
 
 } // namespace game
 } // namespace wowee

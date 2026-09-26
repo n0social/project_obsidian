@@ -18,18 +18,104 @@
 #include <filesystem>
 #include <fstream>
 #include <limits>
+#include <mutex>
 #include <openssl/sha.h>
 #include <openssl/hmac.h>
+#include <cstdio>
 
 namespace wowee {
 namespace game {
 
 namespace {
 
+const char* wardenOpcodeName(uint8_t op, bool inbound) {
+    if (inbound) {
+        switch (op) {
+            case WARDEN_SMSG_MODULE_USE: return "MODULE_USE";
+            case WARDEN_SMSG_MODULE_CACHE: return "MODULE_CACHE";
+            case WARDEN_SMSG_CHEAT_CHECKS_REQUEST: return "CHEAT_CHECKS";
+            case WARDEN_SMSG_MODULE_INITIALIZE: return "MODULE_INIT";
+            case WARDEN_SMSG_HASH_REQUEST: return "HASH_REQUEST";
+            default: return "UNKNOWN_SMSG";
+        }
+    }
+    switch (op) {
+        case WARDEN_CMSG_MODULE_MISSING: return "MODULE_MISSING";
+        case WARDEN_CMSG_MODULE_OK: return "MODULE_OK";
+        case WARDEN_CMSG_CHEAT_CHECKS_RESULT: return "CHEAT_CHECKS_RESULT";
+        case WARDEN_CMSG_HASH_RESULT: return "HASH_RESULT";
+        default: return "UNKNOWN_CMSG";
+    }
+}
+
 std::string asciiLower(std::string s) {
     std::transform(s.begin(), s.end(), s.begin(),
                    [](unsigned char c) { return static_cast<char>(std::tolower(c)); });
     return s;
+}
+
+bool parseHexBytes(const char* hex, uint8_t* out, size_t n) {
+    if (!hex || std::strlen(hex) != n * 2) return false;
+    for (size_t i = 0; i < n; ++i) {
+        unsigned v = 0;
+        if (std::sscanf(hex + static_cast<int>(i) * 2, "%2x", &v) != 1) return false;
+        out[i] = static_cast<uint8_t>(v);
+    }
+    return true;
+}
+
+std::string bytesToHex(const uint8_t* data, size_t n) {
+    std::string out;
+    out.resize(n * 2);
+    for (size_t i = 0; i < n; ++i) {
+        char buf[3];
+        std::snprintf(buf, sizeof(buf), "%02x", data[i]);
+        out[i * 2] = buf[0];
+        out[i * 2 + 1] = buf[1];
+    }
+    return out;
+}
+
+// TwinStar/Kronos HASH_REQUEST used this MaNGOS/TrinityCore WardenWin sample seed.
+// It is not in the 1000-entry VMaNGOS .cr pack, so MODULE_OK + CR lookup misses
+// and the world session dies ~60s later with no HASH_RESULT.
+struct PublishedCRBytes {
+    uint8_t seed[16];
+    uint8_t reply[20];
+    uint8_t clientKey[16];
+    uint8_t serverKey[16];
+};
+
+bool lookupPublishedCR(const std::string& moduleMd5Hex, const uint8_t* seed, PublishedCRBytes& out) {
+    static const struct {
+        const char* md5;
+        const char* seed;
+        const char* reply;
+        const char* clientKey;
+        const char* serverKey;
+    } kRows[] = {
+        {
+            "79c0768d657977d697e10bad956cced1",
+            "4d808d2c77d905c41a6380ec08586afe",
+            "568c054c781a972a6037a2290c22b52571a06f4e",
+            "7f96eefda5b63d20a4df8e00cbf48304",
+            "c2b7adedfccca9c2bfb3f85602ba809b",
+        },
+    };
+
+    const std::string md5 = asciiLower(moduleMd5Hex);
+    for (const auto& row : kRows) {
+        uint8_t s[16];
+        if (!parseHexBytes(row.seed, s, 16)) continue;
+        if (std::memcmp(s, seed, 16) != 0) continue;
+        if (md5 != row.md5) continue;
+        if (!parseHexBytes(row.seed, out.seed, 16)) return false;
+        if (!parseHexBytes(row.reply, out.reply, 20)) return false;
+        if (!parseHexBytes(row.clientKey, out.clientKey, 16)) return false;
+        if (!parseHexBytes(row.serverKey, out.serverKey, 16)) return false;
+        return true;
+    }
+    return false;
 }
 
 std::vector<std::string> splitWowPath(const std::string& wowPath) {
@@ -269,6 +355,7 @@ void WardenHandler::registerOpcodes(DispatchTable& table) {
 // ---------------------------------------------------------------------------
 
 void WardenHandler::reset() {
+    std::lock_guard<std::recursive_mutex> lock(wardenIoMutex_);
     requiresWarden_ = false;
     wardenGateSeen_ = false;
     wardenGateElapsed_ = 0.0f;
@@ -294,32 +381,132 @@ void WardenHandler::reset() {
         0xF3, 0xD9, 0xB2, 0xBF, 0x98, 0x8B, 0x7E, 0x71, 0x57
     };
     std::memcpy(wardenCheckOpcodes_, kClassicOps, sizeof(wardenCheckOpcodes_));
+    lastRxValid_ = false;
+    lastTxValid_ = false;
+    lastRxOpcode_ = 0;
+    lastTxOpcode_ = 0;
+    unansweredCheatCheck_ = false;
+    unansweredHashRequest_ = false;
+    lastCheatResultBytes_ = 0;
 }
 
 // ---------------------------------------------------------------------------
 // Update (called from GameHandler::update)
 // ---------------------------------------------------------------------------
 
+bool WardenHandler::ensureWardenMemoryLoaded() {
+    if (wardenMemory_ && wardenMemory_->isLoaded()) {
+        return true;
+    }
+    if (!wardenMemory_) {
+        wardenMemory_ = std::make_unique<WardenMemory>();
+    }
+    if (!wardenMemory_->load(static_cast<uint16_t>(owner_.getBuild()), isActiveExpansion("turtle"))) {
+        LOG_WARNING("Warden: Could not load WoW.exe for MEM_CHECK");
+        wardenMemory_.reset();
+        return false;
+    }
+    return true;
+}
+
+uint32_t WardenHandler::wardenTickMs() {
+    return static_cast<uint32_t>(
+        std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
+std::vector<uint8_t> WardenHandler::frameCheatChecksResult(const std::vector<uint8_t>& resultData) {
+    // [0x02][uint16 length][uint32 checksum][resultData] — checksum on calling thread only.
+    auto resultHash = auth::Crypto::sha1(resultData);
+    uint32_t checksum = 0;
+    for (int i = 0; i < 5; i++) {
+        uint32_t word = resultHash[i * 4]
+                      | (uint32_t(resultHash[i * 4 + 1]) << 8)
+                      | (uint32_t(resultHash[i * 4 + 2]) << 16)
+                      | (uint32_t(resultHash[i * 4 + 3]) << 24);
+        checksum ^= word;
+    }
+    uint16_t resultLen = static_cast<uint16_t>(resultData.size());
+    std::vector<uint8_t> resp;
+    resp.reserve(7 + resultData.size());
+    resp.push_back(WARDEN_CMSG_CHEAT_CHECKS_RESULT);
+    resp.push_back(resultLen & 0xFF);
+    resp.push_back((resultLen >> 8) & 0xFF);
+    resp.push_back(checksum & 0xFF);
+    resp.push_back((checksum >> 8) & 0xFF);
+    resp.push_back((checksum >> 16) & 0xFF);
+    resp.push_back((checksum >> 24) & 0xFF);
+    resp.insert(resp.end(), resultData.begin(), resultData.end());
+    return resp;
+}
+
+void WardenHandler::drainPendingResponse() {
+    std::lock_guard<std::recursive_mutex> lock(wardenIoMutex_);
+    if (!wardenResponsePending_) {
+        return;
+    }
+    auto status = wardenPendingEncrypted_.wait_for(std::chrono::milliseconds(0));
+    if (status != std::future_status::ready) {
+        return;
+    }
+    auto resultData = wardenPendingEncrypted_.get();
+    wardenResponsePending_ = false;
+    if (resultData.empty()) {
+        LOG_ERROR("Warden: async CHEAT_CHECKS_RESULT was empty — nothing sent");
+        return;
+    }
+    if (!wardenCrypto_) {
+        LOG_ERROR("Warden: async CHEAT_CHECKS_RESULT ready but crypto missing — nothing sent");
+        return;
+    }
+    // Frame + checksum on the main thread (async worker only builds resultData).
+    std::vector<uint8_t> plaintext = frameCheatChecksResult(resultData);
+    std::vector<uint8_t> encrypted = wardenCrypto_->encrypt(plaintext);
+    network::Packet response(wireOpcode(Opcode::CMSG_WARDEN_DATA));
+    for (uint8_t byte : encrypted) {
+        response.writeUInt8(byte);
+    }
+    if (owner_.getSocket() && owner_.getSocket()->isConnected()) {
+        owner_.getSocket()->send(response);
+        lastTx_ = std::chrono::steady_clock::now();
+        lastTxOpcode_ = WARDEN_CMSG_CHEAT_CHECKS_RESULT;
+        lastTxValid_ = true;
+        unansweredCheatCheck_ = false;
+        lastCheatResultBytes_ = resultData.size();
+        LOG_WARNING("Warden: Sent async CHEAT_CHECKS_RESULT (result=", resultData.size(),
+                    " framed=", plaintext.size(), " wire=", encrypted.size(), ")");
+    } else {
+        LOG_ERROR("Warden: async CHEAT_CHECKS_RESULT ready but socket down — nothing sent");
+    }
+}
+
+std::string WardenHandler::describeLastExchange() const {
+    std::lock_guard<std::recursive_mutex> lock(wardenIoMutex_);
+    const auto now = std::chrono::steady_clock::now();
+    auto fmt = [&](bool valid, uint8_t op, std::chrono::steady_clock::time_point tp, bool inbound) {
+        if (!valid) return std::string("none");
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - tp).count();
+        char buf[96];
+        std::snprintf(buf, sizeof(buf), "0x%02X %s %lldms ago",
+                      op, wardenOpcodeName(op, inbound), static_cast<long long>(ms));
+        return std::string(buf);
+    };
+    std::string out = "RX=";
+    out += fmt(lastRxValid_, lastRxOpcode_, lastRx_, true);
+    out += " TX=";
+    out += fmt(lastTxValid_, lastTxOpcode_, lastTx_, false);
+    if (unansweredCheatCheck_) out += " unanswered_cheat_check=yes";
+    if (unansweredHashRequest_) out += " unanswered_hash_request=yes";
+    if (lastCheatResultBytes_ > 0) {
+        out += " last_result_bytes=";
+        out += std::to_string(lastCheatResultBytes_);
+    }
+    return out;
+}
+
 void WardenHandler::update(float deltaTime) {
     // Drain pending async Warden response (built on background thread to avoid 5s stalls)
-    if (wardenResponsePending_) {
-        auto status = wardenPendingEncrypted_.wait_for(std::chrono::milliseconds(0));
-        if (status == std::future_status::ready) {
-            auto plaintext = wardenPendingEncrypted_.get();
-            wardenResponsePending_ = false;
-            if (!plaintext.empty() && wardenCrypto_) {
-                std::vector<uint8_t> encrypted = wardenCrypto_->encrypt(plaintext);
-                network::Packet response(wireOpcode(Opcode::CMSG_WARDEN_DATA));
-                for (uint8_t byte : encrypted) {
-                    response.writeUInt8(byte);
-                }
-                if (owner_.getSocket() && owner_.getSocket()->isConnected()) {
-                    owner_.getSocket()->send(response);
-                    LOG_WARNING("Warden: Sent async CHEAT_CHECKS_RESULT (", plaintext.size(), " bytes plaintext)");
-                }
-            }
-        }
-    }
+    drainPendingResponse();
 
     // Post-gate visibility
     if (wardenGateSeen_ && owner_.getSocket() && owner_.getSocket()->isConnected()) {
@@ -470,7 +657,97 @@ bool WardenHandler::loadWardenCRFile(const std::string& moduleHashHex) {
     }
 
     LOG_INFO("Warden: Loaded ", entryCount, " CR entries from ", crPath);
+    mergePublishedCREntries(moduleHashHex);
     return true;
+}
+
+void WardenHandler::mergePublishedCREntries(const std::string& moduleHashHex) {
+    uint8_t seed[16];
+    if (!parseHexBytes("4d808d2c77d905c41a6380ec08586afe", seed, 16)) return;
+    PublishedCRBytes pub{};
+    if (!lookupPublishedCR(moduleHashHex, seed, pub)) return;
+    for (const auto& existing : wardenCREntries_) {
+        if (std::memcmp(existing.seed, pub.seed, 16) == 0) return;
+    }
+    WardenCREntry entry{};
+    std::memcpy(entry.seed, pub.seed, 16);
+    std::memcpy(entry.reply, pub.reply, 20);
+    std::memcpy(entry.clientKey, pub.clientKey, 16);
+    std::memcpy(entry.serverKey, pub.serverKey, 16);
+    wardenCREntries_.push_back(entry);
+    LOG_WARNING("Warden: merged published MaNGOS/Trinity CR seed into table (now ",
+                wardenCREntries_.size(), " entries) — shared by RetroWoW and Kronos");
+}
+
+#pragma pack(push, 1)
+struct WardenInitModuleRequest {
+    uint8_t Command1;
+    uint16_t Size1;
+    uint32_t CheckSumm1;
+    uint8_t Unk1;
+    uint8_t Unk2;
+    uint8_t Type;
+    uint8_t StringLibrary1;
+    uint32_t Function1[4];
+    uint8_t Command2;
+    uint16_t Size2;
+    uint32_t CheckSumm2;
+    uint8_t Unk3;
+    uint8_t Unk4;
+    uint8_t StringLibrary2;
+    uint32_t Function2;
+    uint8_t Function2Set;
+    uint8_t Command3;
+    uint16_t Size3;
+    uint32_t CheckSumm3;
+    uint8_t Unk5;
+    uint8_t Unk6;
+    uint8_t StringLibrary3;
+    uint32_t Function3;
+    uint8_t Function3Set;
+};
+#pragma pack(pop)
+
+static_assert(sizeof(WardenInitModuleRequest) == 57,
+              "MaNGOS WardenInitModuleRequest is 57 bytes (Kronos/RetroWoW MODULE_INIT)");
+
+void WardenHandler::handleModuleInitialize(const std::vector<uint8_t>& decrypted) {
+    std::string hex;
+    hex.reserve(decrypted.size() * 3);
+    for (uint8_t b : decrypted) {
+        char s[4];
+        std::snprintf(s, sizeof(s), "%02x ", b);
+        hex += s;
+    }
+    LOG_WARNING("Warden: MODULE_INITIALIZE size=", decrypted.size(), " hex=[", hex, "]");
+
+    if (decrypted.size() == sizeof(WardenInitModuleRequest)) {
+        WardenInitModuleRequest req{};
+        std::memcpy(&req, decrypted.data(), sizeof(req));
+        LOG_WARNING("Warden: MODULE_INIT SFile RVAs=",
+                    [&] {
+                        char buf[80];
+                        std::snprintf(buf, sizeof(buf),
+                                      "0x%08x,0x%08x,0x%08x,0x%08x",
+                                      req.Function1[0], req.Function1[1],
+                                      req.Function1[2], req.Function1[3]);
+                        return std::string(buf);
+                    }(),
+                    " GetText=0x",
+                    [&] { char s[12]; std::snprintf(s, 12, "%08x", req.Function2); return std::string(s); }(),
+                    " PerfCounter=0x",
+                    [&] { char s[12]; std::snprintf(s, 12, "%08x", req.Function3); return std::string(s); }());
+        if (wardenMemory_ && wardenMemory_->isLoaded() && req.Function3 != 0) {
+            // PerformanceCounter / LastHardwareAction pairing used by TIMING on both realms.
+            const uint32_t va = req.Function3;
+            if (va >= 0x400000 && va < 0x00E00000) {
+                const uint32_t ticks = wardenTickMs();
+                const uint32_t lha = (ticks > 2000u) ? (ticks - 2000u) : 0u;
+                wardenMemory_->writeLE32(0xCF0BC8, lha);
+            }
+        }
+    }
+    ensureWardenMemoryLoaded();
 }
 
 // ---------------------------------------------------------------------------
@@ -478,6 +755,10 @@ bool WardenHandler::loadWardenCRFile(const std::string& moduleHashHex) {
 // ---------------------------------------------------------------------------
 
 void WardenHandler::handleWardenData(network::Packet& packet) {
+    std::lock_guard<std::recursive_mutex> lock(wardenIoMutex_);
+    // Flush any completed async reply before touching RC4 again.
+    drainPendingResponse();
+
     const auto& data = packet.getData();
     if (!wardenGateSeen_) {
         wardenGateSeen_ = true;
@@ -552,6 +833,15 @@ void WardenHandler::handleWardenData(network::Packet& packet) {
     }
 
     uint8_t wardenOpcode = decrypted[0];
+    lastRx_ = std::chrono::steady_clock::now();
+    lastRxOpcode_ = wardenOpcode;
+    lastRxValid_ = true;
+    if (wardenOpcode == WARDEN_SMSG_CHEAT_CHECKS_REQUEST) {
+        unansweredCheatCheck_ = true;
+    }
+    LOG_WARNING("Warden: RX ", wardenOpcodeName(wardenOpcode, true),
+                " op=0x", std::hex, static_cast<int>(wardenOpcode), std::dec,
+                " size=", decrypted.size());
 
     // Helper to send an encrypted Warden response
     auto sendWardenResponse = [&](const std::vector<uint8_t>& plaintext) {
@@ -562,6 +852,13 @@ void WardenHandler::handleWardenData(network::Packet& packet) {
         }
         if (owner_.getSocket() && owner_.getSocket()->isConnected()) {
             owner_.getSocket()->send(response);
+            lastTx_ = std::chrono::steady_clock::now();
+            lastTxOpcode_ = plaintext.empty() ? 0 : plaintext[0];
+            lastTxValid_ = true;
+            if (lastTxOpcode_ == WARDEN_CMSG_CHEAT_CHECKS_RESULT) {
+                unansweredCheatCheck_ = false;
+                lastCheatResultBytes_ = plaintext.size();
+            }
             LOG_DEBUG("Warden: Sent response (", plaintext.size(), " bytes plaintext)");
         }
     };
@@ -589,18 +886,22 @@ void WardenHandler::handleWardenData(network::Packet& packet) {
 
                 // Try to load pre-computed challenge/response entries
                 if (loadWardenCRFile(hashHex)) {
-                    LOG_WARNING("Warden: MODULE_USE — loaded CR table for ", hashHex);
-                } else {
-                    LOG_WARNING("Warden: MODULE_USE — missing CR table for ", hashHex,
-                                " (HASH_REQUEST will fail until .cr is installed)");
+                    LOG_WARNING("Warden: MODULE_USE — CR table loaded for ", hashHex,
+                                "; sending MODULE_OK (skip module download)");
+                    sendWardenResponse({ WARDEN_CMSG_MODULE_OK });
+                    wardenState_ = WardenState::WAIT_HASH_REQUEST;
+                    break;
                 }
+                LOG_WARNING("Warden: MODULE_USE — missing CR table for ", hashHex,
+                            " (HASH_REQUEST will fail until .cr is installed)");
             }
 
             // Respond with MODULE_MISSING to request the module data
             std::vector<uint8_t> resp = { WARDEN_CMSG_MODULE_MISSING };
             sendWardenResponse(resp);
             wardenState_ = WardenState::WAIT_MODULE_CACHE;
-            LOG_DEBUG("Warden: Sent MODULE_MISSING for module size=", wardenModuleSize_, ", waiting for data chunks");
+            LOG_WARNING("Warden: Sent MODULE_MISSING for module size=", wardenModuleSize_,
+                        ", waiting for data chunks");
             break;
         }
 
@@ -698,17 +999,31 @@ void WardenHandler::handleWardenData(network::Packet& packet) {
 
             std::vector<uint8_t> seed(decrypted.begin() + 1, decrypted.begin() + 17);
 
-            // --- Try CR lookup (pre-computed challenge/response entries) ---
+            const WardenCREntry* match = nullptr;
+            WardenCREntry publishedStore{};
             if (!wardenCREntries_.empty()) {
-                const WardenCREntry* match = nullptr;
                 for (const auto& entry : wardenCREntries_) {
                     if (std::memcmp(entry.seed, seed.data(), 16) == 0) {
                         match = &entry;
                         break;
                     }
                 }
+            }
+            if (!match && wardenModuleHash_.size() == 16) {
+                PublishedCRBytes published{};
+                const std::string md5Hex = bytesToHex(wardenModuleHash_.data(), wardenModuleHash_.size());
+                if (lookupPublishedCR(md5Hex, seed.data(), published)) {
+                    std::memcpy(publishedStore.seed, published.seed, 16);
+                    std::memcpy(publishedStore.reply, published.reply, 20);
+                    std::memcpy(publishedStore.clientKey, published.clientKey, 16);
+                    std::memcpy(publishedStore.serverKey, published.serverKey, 16);
+                    match = &publishedStore;
+                    LOG_WARNING("Warden: HASH_REQUEST — published MaNGOS/Trinity CR matched for ",
+                                md5Hex, " (seed missing from .cr pack)");
+                }
+            }
 
-                if (match) {
+            if (match) {
                     LOG_WARNING("Warden: HASH_REQUEST — CR entry MATCHED, sending pre-computed reply");
 
                     // Send HASH_RESULT
@@ -716,6 +1031,7 @@ void WardenHandler::handleWardenData(network::Packet& packet) {
                     resp.push_back(WARDEN_CMSG_HASH_RESULT);
                     resp.insert(resp.end(), match->reply, match->reply + 20);
                     sendWardenResponse(resp);
+                    unansweredHashRequest_ = false;
 
                     // Switch to new RC4 keys from the CR entry
                     // clientKey = encrypt (client→server), serverKey = decrypt (server→client)
@@ -727,11 +1043,12 @@ void WardenHandler::handleWardenData(network::Packet& packet) {
                                 [&]{ char s[4]; snprintf(s,4,"%02x", wardenCrypto_->checkXorByte()); return std::string(s); }(),
                                 ")");
 
+                    // Prefetch PE image now so the first CHEAT_CHECKS MEM reads
+                    // can answer synchronously without a false PAGE→async stall.
+                    ensureWardenMemoryLoaded();
+
                     wardenState_ = WardenState::WAIT_CHECKS;
                     break;
-                } else {
-                    LOG_WARNING("Warden: Seed not found in ", wardenCREntries_.size(), " CR entries");
-                }
             }
 
             // No CR match (or no .cr loaded). VMaNGOS/RetroWoW memcmp the reply
@@ -745,6 +1062,7 @@ void WardenHandler::handleWardenData(network::Packet& packet) {
                           " — no CR match among ", wardenCREntries_.size(),
                           " entries; refusing fabricated fallback (server would kick)");
             }
+            unansweredHashRequest_ = true;
             wardenState_ = WardenState::WAIT_CHECKS;
             break;
         }
@@ -948,31 +1266,78 @@ void WardenHandler::handleWardenData(network::Packet& packet) {
 
             LOG_DEBUG("Warden: XOR byte = 0x", [&]{ char s[4]; snprintf(s,4,"%02x",xorByte); return std::string(s); }());
 
-            // Quick-scan for PAGE_A/PAGE_B checks (these trigger 5-second brute-force searches)
+            // Detect real PAGE_A/PAGE_B opcodes only (not raw body bytes). Scanning every
+            // XOR'd byte false-positives on MODULE seeds (e.g. 0x05 → PAGE_B) and forces
+            // async replies that can miss the send window during world-enter load.
+            // Known-fast PAGE scans (sanity patterns / hint hits) stay on the sync path.
             {
+                auto isKnownFastPageBody = [&](const uint8_t* p) -> bool {
+                    // p = [4 seed][20 sha1][4 off][1 len]
+                    uint32_t off = uint32_t(p[24]) | (uint32_t(p[25]) << 8)
+                                 | (uint32_t(p[26]) << 16) | (uint32_t(p[27]) << 24);
+                    uint8_t len = p[28];
+                    auto hmacMatch = [&](const uint8_t* pat, size_t patLen) -> bool {
+                        uint8_t out[SHA_DIGEST_LENGTH]; unsigned int outLen = 0;
+                        HMAC(EVP_sha1(), p, 4, pat, patLen, out, &outLen);
+                        return outLen == 20 && !std::memcmp(out, p + 4, 20);
+                    };
+                    // Packet-process sanity (PAGE_A @ RVA 0x3620)
+                    static constexpr uint8_t p1[] = {
+                        0x33,0xD2,0x33,0xC9,0xE8,0x87,0x07,0x1B,0x00,0xE8
+                    };
+                    if (off == 13856 && len == sizeof(p1) && hmacMatch(p1, sizeof(p1))) return true;
+                    // VMaNGOS "Warden Memory Read check" (PAGE_B) — 37-byte memcpy pattern
+                    static constexpr uint8_t p2[] = {
+                        0x56,0x57,0xFC,0x8B,0x54,0x24,0x14,0x8B,
+                        0x74,0x24,0x10,0x8B,0x44,0x24,0x0C,0x8B,
+                        0xCA,0x8B,0xF8,0xC1,0xE9,0x02,0x74,0x02,
+                        0xF3,0xA5,0xB1,0x03,0x23,0xCA,0x74,0x02,
+                        0xF3,0xA4,0x5F,0x5E,0xC3
+                    };
+                    if (len == sizeof(p2) && hmacMatch(p2, sizeof(p2))) return true;
+                    return false;
+                };
+
                 bool hasSlowChecks = false;
-                for (size_t i = pos; i < checkEndEarly; i++) {
-                    uint8_t d = decrypted[i] ^ xorByte;
-                    if (d == wardenCheckOpcodes_[2] || d == wardenCheckOpcodes_[3]) {
+                size_t scanPos = pos;
+                while (scanPos < checkEndEarly) {
+                    const uint8_t decoded = static_cast<uint8_t>(decrypted[scanPos] ^ xorByte);
+                    int body = -1;
+                    if (decoded == wardenCheckOpcodes_[0]) body = 6;       // MEM
+                    else if (decoded == wardenCheckOpcodes_[1]) body = 24; // MODULE
+                    else if (decoded == wardenCheckOpcodes_[2] ||
+                             decoded == wardenCheckOpcodes_[3]) {
+                        body = 29; // PAGE_A / PAGE_B
+                        if (scanPos + 1 + 29 <= checkEndEarly &&
+                            isKnownFastPageBody(decrypted.data() + scanPos + 1)) {
+                            // Instant answer — keep sync so checksum/RC4 stay on main thread.
+                            scanPos += 1 + 29;
+                            continue;
+                        }
                         hasSlowChecks = true;
                         break;
                     }
+                    else if (decoded == wardenCheckOpcodes_[4]) body = 1;  // MPQ
+                    else if (decoded == wardenCheckOpcodes_[5]) body = 1;  // LUA
+                    else if (decoded == wardenCheckOpcodes_[6]) body = 30; // PROC
+                    else if (decoded == wardenCheckOpcodes_[7]) body = 25; // DRIVER
+                    else if (decoded == wardenCheckOpcodes_[8]) body = 0;  // TIMING
+                    else break; // unknown — fall through to sync parser
+                    if (body < 0 || scanPos + 1 + static_cast<size_t>(body) > checkEndEarly) {
+                        break;
+                    }
+                    scanPos += 1 + static_cast<size_t>(body);
                 }
                 if (hasSlowChecks && !wardenResponsePending_) {
                     LOG_WARNING("Warden: PAGE_A/PAGE_B detected — building response async to avoid main-loop stall");
-                    // Ensure wardenMemory_ is loaded on main thread before launching async task
-                    if (!wardenMemory_) {
-                        wardenMemory_ = std::make_unique<WardenMemory>();
-                        if (!wardenMemory_->load(static_cast<uint16_t>(owner_.getBuild()), isActiveExpansion("turtle"))) {
-                            LOG_WARNING("Warden: Could not load WoW.exe for MEM_CHECK");
-                        }
-                    }
+                    ensureWardenMemoryLoaded();
                     // Capture state by value (decrypted, strings) and launch async.
-                    // The async task returns plaintext response bytes; main thread encrypts+sends in update().
+                    // Worker returns RAW resultData only; main thread frames/checksums/encrypts.
                     size_t capturedPos = pos;
                     size_t capturedCheckEnd = checkEndEarly;
+                    const uint32_t sharedTicks = wardenTickMs();
                     wardenPendingEncrypted_ = std::async(std::launch::async,
-                        [this, decrypted, strings, xorByte, capturedPos, capturedCheckEnd]() -> std::vector<uint8_t> {
+                        [this, decrypted, strings, xorByte, capturedPos, capturedCheckEnd, sharedTicks]() -> std::vector<uint8_t> {
                             // This runs on a background thread — same logic as the synchronous path below.
                             // BEGIN: duplicated check processing (kept in sync with synchronous path)
                             enum CheckType { CT_MEM=0, CT_PAGE_A=1, CT_PAGE_B=2, CT_MPQ=3, CT_LUA=4,
@@ -1031,9 +1396,7 @@ void WardenHandler::handleWardenData(network::Packet& packet) {
                                 switch (ct) {
                                 case CT_TIMING: {
                                     resultData.push_back(0x01);
-                                    uint32_t ticks = static_cast<uint32_t>(
-                                        std::chrono::duration_cast<std::chrono::milliseconds>(
-                                            std::chrono::steady_clock::now().time_since_epoch()).count());
+                                    uint32_t ticks = sharedTicks;
                                     resultData.push_back(ticks & 0xFF);
                                     resultData.push_back((ticks >> 8) & 0xFF);
                                     resultData.push_back((ticks >> 16) & 0xFF);
@@ -1052,17 +1415,16 @@ void WardenHandler::handleWardenData(network::Packet& packet) {
                                              " len=", (int)readLen,
                                              (strIdx ? " module=\"" + moduleName + "\"" : ""));
                                     if (offset == WARDEN_TICKCOUNT_ADDRESS && readLen == 4 && wardenMemory_ && wardenMemory_->isLoaded()) {
-                                        uint32_t now = static_cast<uint32_t>(
-                                            std::chrono::duration_cast<std::chrono::milliseconds>(
-                                                std::chrono::steady_clock::now().time_since_epoch()).count());
-                                        wardenMemory_->writeLE32(0xCF0BC8, now - 2000);
+                                        uint32_t lha = (sharedTicks > 2000u) ? (sharedTicks - 2000u) : 0u;
+                                        wardenMemory_->writeLE32(0xCF0BC8, lha);
                                     }
                                     std::vector<uint8_t> memBuf(readLen, 0);
                                     bool memOk = wardenMemory_ && wardenMemory_->isLoaded() &&
                                                  wardenMemory_->readMemory(offset, readLen, memBuf.data());
                                     if (memOk) {
                                         const char* region = "?";
-                                        if (offset >= KUSER_SHARED_DATA_BASE && offset < KUSER_SHARED_DATA_END) region = "KUSER";
+                                        if (wardenMemory_->coversOverlay(offset, readLen)) region = "overlay";
+                                        else if (offset >= KUSER_SHARED_DATA_BASE && offset < KUSER_SHARED_DATA_END) region = "KUSER";
                                         else if (offset >= PE_TEXT_SECTION_BASE && offset < PE_TEXT_SECTION_END) region = ".text/.code";
                                         else if (offset >= PE_RDATA_SECTION_BASE && offset < PE_DATA_RAW_SECTION_BASE) region = ".rdata";
                                         else if (offset >= PE_DATA_RAW_SECTION_BASE && offset < PE_BSS_SECTION_BASE) region = ".data(raw)";
@@ -1227,22 +1589,8 @@ void WardenHandler::handleWardenData(network::Packet& packet) {
                                 LOG_WARNING("Warden: RESPONSE_HEX [", fullHex, "]");
                             }
 
-                            // Build plaintext response: [0x02][uint16 len][uint32 checksum][resultData]
-                            auto resultHash = auth::Crypto::sha1(resultData);
-                            uint32_t checksum = 0;
-                            for (int i = 0; i < 5; i++) {
-                                uint32_t word = resultHash[i*4] | (uint32_t(resultHash[i*4+1])<<8)
-                                              | (uint32_t(resultHash[i*4+2])<<16) | (uint32_t(resultHash[i*4+3])<<24);
-                                checksum ^= word;
-                            }
-                            uint16_t rl = static_cast<uint16_t>(resultData.size());
-                            std::vector<uint8_t> resp;
-                            resp.push_back(0x02);
-                            resp.push_back(rl & 0xFF); resp.push_back((rl >> 8) & 0xFF);
-                            resp.push_back(checksum & 0xFF); resp.push_back((checksum >> 8) & 0xFF);
-                            resp.push_back((checksum >> 16) & 0xFF); resp.push_back((checksum >> 24) & 0xFF);
-                            resp.insert(resp.end(), resultData.begin(), resultData.end());
-                            return resp; // plaintext; main thread will encrypt + send
+                            // Return RAW result bytes only — main thread frames+checksums+encrypts.
+                            return resultData;
                         });
                     wardenResponsePending_ = true;
                     break; // exit case 0x02 — response will be sent from update()
@@ -1359,6 +1707,7 @@ void WardenHandler::handleWardenData(network::Packet& packet) {
             // --- Parse check entries and build response ---
             std::vector<uint8_t> resultData;
             int checkCount = 0;
+            const uint32_t sharedTicks = wardenTickMs();
 
             while (pos < checkEnd) {
                 CheckType ct = decodeCheckType(decrypted[pos]);
@@ -1373,9 +1722,7 @@ void WardenHandler::handleWardenData(network::Packet& packet) {
                         // No additional request data
                         // Response: [uint8 result][uint32 ticks]
                         resultData.push_back(0x01);
-                        uint32_t ticks = static_cast<uint32_t>(
-                            std::chrono::duration_cast<std::chrono::milliseconds>(
-                                std::chrono::steady_clock::now().time_since_epoch()).count());
+                        uint32_t ticks = sharedTicks;
                         resultData.push_back(ticks & 0xFF);
                         resultData.push_back((ticks >> 8) & 0xFF);
                         resultData.push_back((ticks >> 16) & 0xFF);
@@ -1397,24 +1744,20 @@ void WardenHandler::handleWardenData(network::Packet& packet) {
                                  moduleName.empty() ? "" : (" module=\"" + moduleName + "\""));
 
                         // Lazy-load WoW.exe PE image on first MEM_CHECK
-                        if (!wardenMemory_) {
-                            wardenMemory_ = std::make_unique<WardenMemory>();
-                            if (!wardenMemory_->load(static_cast<uint16_t>(owner_.getBuild()), isActiveExpansion("turtle"))) {
-                                LOG_WARNING("Warden: Could not load WoW.exe for MEM_CHECK");
-                            }
+                        if (!ensureWardenMemoryLoaded()) {
+                            LOG_WARNING("Warden: Could not load WoW.exe for MEM_CHECK");
                         }
 
                         // Dynamically update LastHardwareAction before reading
                         if (offset == 0x00CF0BC8 && readLen == 4 && wardenMemory_ && wardenMemory_->isLoaded()) {
-                            uint32_t now = static_cast<uint32_t>(
-                                std::chrono::duration_cast<std::chrono::milliseconds>(
-                                    std::chrono::steady_clock::now().time_since_epoch()).count());
-                            wardenMemory_->writeLE32(0xCF0BC8, now - 2000);
+                            uint32_t lha = (sharedTicks > 2000u) ? (sharedTicks - 2000u) : 0u;
+                            wardenMemory_->writeLE32(0xCF0BC8, lha);
                         }
 
                         // Read bytes from PE image (includes patched runtime globals)
                         std::vector<uint8_t> memBuf(readLen, 0);
-                        if (wardenMemory_->isLoaded() && wardenMemory_->readMemory(offset, readLen, memBuf.data())) {
+                        if (wardenMemory_ && wardenMemory_->isLoaded() &&
+                            wardenMemory_->readMemory(offset, readLen, memBuf.data())) {
                             LOG_DEBUG("Warden:   MEM_CHECK served from PE image");
                             resultData.push_back(0x00);
                             resultData.insert(resultData.end(), memBuf.begin(), memBuf.end());
@@ -1690,50 +2033,32 @@ void WardenHandler::handleWardenData(network::Packet& packet) {
             // Log synchronous round summary at WARNING level for diagnostics
             {
                 LOG_WARNING("Warden: (sync) Parsed ", checkCount, " checks, resultSize=", resultData.size());
+                // Single-line hex — Android log lines truncate mid-message when we insert
+                // newlines, which hid the tail of integrity replies during kick diagnosis.
                 std::string fullHex;
+                fullHex.reserve(resultData.size() * 3);
                 for (size_t bi = 0; bi < resultData.size(); bi++) {
                     char hx[4]; snprintf(hx, 4, "%02x ", resultData[bi]); fullHex += hx;
-                    if ((bi + 1) % 32 == 0 && bi + 1 < resultData.size()) fullHex += "\n                    ";
                 }
                 LOG_WARNING("Warden: (sync) RESPONSE_HEX [", fullHex, "]");
             }
 
-            // --- Compute checksum: XOR of 5 uint32s from SHA1(resultData) ---
-            auto resultHash = auth::Crypto::sha1(resultData);
-            uint32_t checksum = 0;
-            for (int i = 0; i < 5; i++) {
-                uint32_t word = resultHash[i*4]
-                              | (uint32_t(resultHash[i*4+1]) << 8)
-                              | (uint32_t(resultHash[i*4+2]) << 16)
-                              | (uint32_t(resultHash[i*4+3]) << 24);
-                checksum ^= word;
-            }
-
-            // --- Build response: [0x02][uint16 length][uint32 checksum][resultData] ---
-            uint16_t resultLen = static_cast<uint16_t>(resultData.size());
-            std::vector<uint8_t> resp;
-            resp.push_back(0x02);
-            resp.push_back(resultLen & 0xFF);
-            resp.push_back((resultLen >> 8) & 0xFF);
-            resp.push_back(checksum & 0xFF);
-            resp.push_back((checksum >> 8) & 0xFF);
-            resp.push_back((checksum >> 16) & 0xFF);
-            resp.push_back((checksum >> 24) & 0xFF);
-            resp.insert(resp.end(), resultData.begin(), resultData.end());
+            // --- Frame + checksum on main thread, then encrypt ---
+            std::vector<uint8_t> resp = frameCheatChecksResult(resultData);
             sendWardenResponse(resp);
-            LOG_DEBUG("Warden: Sent CHEAT_CHECKS_RESULT (", resp.size(), " bytes, ",
-                     checkCount, " checks, checksum=0x",
-                     [&]{char s[12];snprintf(s,12,"%08x",checksum);return std::string(s);}(), ")");
+            LOG_WARNING("Warden: Sent CHEAT_CHECKS_RESULT (", resp.size(), " bytes, ",
+                     checkCount, " checks)");
             break;
         }
 
         case 0x03: // WARDEN_SMSG_MODULE_INITIALIZE
-            LOG_DEBUG("Warden: MODULE_INITIALIZE (", decrypted.size(), " bytes, no response needed)");
+            handleModuleInitialize(decrypted);
             break;
 
         default:
             LOG_WARNING("Warden: Unknown opcode 0x", std::hex, (int)wardenOpcode, std::dec,
-                     " (state=", (int)wardenState_, ", size=", decrypted.size(), ")");
+                     " (state=", (int)wardenState_, ", size=", decrypted.size(),
+                     ") — RC4 likely desynced (Warden packets handled out of order) or CR keys swapped");
             break;
     }
 }

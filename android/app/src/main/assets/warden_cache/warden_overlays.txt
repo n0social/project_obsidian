@@ -1,0 +1,3 @@
+# VA → exact bytes for Warden MEM outside Wow.exe.
+# EndScene at 6A010000. IDirect3DDevice9 vtable slot 42 from Win7 SP1 d3d9.dll 6.1.7601.17514.
+6A010000 8B FF 55 8B EC 6A FF 68 FC AD 5A 75 64 A1 00 00 00 00 50 83 EC 14 53 56 57 A1 50 92 5B 75 33 C5

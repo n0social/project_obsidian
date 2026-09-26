@@ -31,6 +31,9 @@
 #include <algorithm>
 #include <chrono>
 #include <future>
+#include <mutex>
+#include <thread>
+#include <atomic>
 
 namespace wowee::game {
     class TransportManager;
@@ -2434,6 +2437,10 @@ public:
      */
     void update(float deltaTime);
     void updateNetworking(float deltaTime);
+    /** Socket + Warden-only drain. Safe to call from blocking loads (terrain, audio). */
+    void pumpWardenIo();
+    /** Realm + world-host label for drop logs (RetroWoW and Kronos). */
+    std::string sessionDiagLabel() const;
     void updateTimers(float deltaTime);
     void updateEntityInterpolation(float deltaTime);
     void updateTaxiAndMountState(float deltaTime);
@@ -2868,6 +2875,7 @@ private:
     void enqueueIncomingPacket(const network::Packet& packet);
     void enqueueIncomingPacketFront(network::Packet&& packet);
     void processQueuedIncomingPackets();
+    void drainPendingWardenPackets();
 
     /**
      * Handle SMSG_AUTH_CHALLENGE from server
@@ -3032,6 +3040,7 @@ private:
     std::unique_ptr<SocialHandler>    socialHandler_;
     std::unique_ptr<QuestHandler>     questHandler_;
     std::unique_ptr<WardenHandler>    wardenHandler_;
+    bool inWardenPump_ = false;
 
     // Opcode dispatch table — built once in registerOpcodeHandlers(), called by handlePacket()
     using PacketHandler = std::function<void(network::Packet&)>;

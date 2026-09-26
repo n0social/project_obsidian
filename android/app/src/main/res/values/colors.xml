@@ -1,17 +1,22 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
-    <color name="ic_launcher_background">#0D1117</color>
+    <color name="ic_launcher_background">#07060A</color>
 
-    <!-- Opaque launcher chrome (AetherSX2-style dark shell) -->
-    <color name="obs_bg">#12141A</color>
-    <color name="obs_rail">#0B0D12</color>
-    <color name="obs_panel">#1A1E28</color>
-    <color name="obs_panel_elevated">#232836</color>
-    <color name="obs_stroke">#2E3444</color>
-    <color name="obs_text">#F2F4F8</color>
-    <color name="obs_text_muted">#9AA3B5</color>
-    <color name="obs_accent">#3D7EFF</color>
-    <color name="obs_accent_pressed">#2F66D6</color>
-    <color name="obs_danger">#E25555</color>
-    <color name="obs_ok">#3DCF8E</color>
+    <!-- Obsidian: black + purple. Soft gold secondary for a Classic WoW weight. -->
+    <color name="obs_bg">#07060A</color>
+    <color name="obs_bg_deep">#030208</color>
+    <color name="obs_rail">#0C0A12</color>
+    <color name="obs_panel">#12101A</color>
+    <color name="obs_panel_elevated">#1A1624</color>
+    <color name="obs_stroke">#2A2438</color>
+    <color name="obs_stroke_bright">#4A3A6A</color>
+    <color name="obs_text">#EDE8F5</color>
+    <color name="obs_text_muted">#9B92AE</color>
+    <color name="obs_accent">#7B5CFF</color>
+    <color name="obs_accent_pressed">#6346E0</color>
+    <color name="obs_accent_dim">#3D2A7A</color>
+    <color name="obs_gold">#C9A227</color>
+    <color name="obs_gold_dim">#8A7020</color>
+    <color name="obs_danger">#C45B5B</color>
+    <color name="obs_ok">#A78BFA</color>
 </resources>

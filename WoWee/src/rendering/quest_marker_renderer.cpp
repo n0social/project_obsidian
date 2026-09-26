@@ -302,16 +302,26 @@ void QuestMarkerRenderer::createQuad() {
 }
 
 void QuestMarkerRenderer::loadTextures(pipeline::AssetManager* assetManager) {
+    // Classic 1.12 has Available/Active only — IncompleteQuestIcon is a later-client asset.
     const char* paths[3] = {
         "Interface\\GossipFrame\\AvailableQuestIcon.blp",
         "Interface\\GossipFrame\\ActiveQuestIcon.blp",
         "Interface\\GossipFrame\\IncompleteQuestIcon.blp"
+    };
+    const char* fallbacks[3] = {
+        nullptr,
+        nullptr,
+        "Interface\\GossipFrame\\AvailableQuestIcon.blp"
     };
 
     VkDevice device = vkCtx_->getDevice();
 
     for (int i = 0; i < 3; ++i) {
         pipeline::BLPImage blp = assetManager->loadTexture(paths[i]);
+        if (!blp.isValid() && fallbacks[i]) {
+            LOG_WARNING("Quest marker texture missing (", paths[i], "), falling back to ", fallbacks[i]);
+            blp = assetManager->loadTexture(fallbacks[i]);
+        }
         if (!blp.isValid()) {
             LOG_WARNING("Failed to load quest marker texture: ", paths[i]);
             continue;

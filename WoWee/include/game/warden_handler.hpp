@@ -1,11 +1,15 @@
 #pragma once
 
 #include "game/opcode_table.hpp"
+#include "game/warden_constants.hpp"
 #include "network/packet.hpp"
 #include <cstdint>
+#include <chrono>
 #include <functional>
 #include <future>
 #include <memory>
+#include <mutex>
+#include <atomic>
 #include <string>
 #include <unordered_map>
 #include <vector>
@@ -51,9 +55,27 @@ public:
     /** Called from GameHandler::update() to drain async warden response + log gate timing. */
     void update(float deltaTime);
 
+    /** Encrypt+send a completed async CHEAT_CHECKS_RESULT if ready (non-blocking). */
+    void drainPendingResponse();
+
+    /** Human-readable last Warden RX/TX for world-drop diagnostics. */
+    std::string describeLastExchange() const;
+    bool hasUnansweredCheatCheck() const { return unansweredCheatCheck_; }
+    bool hasUnansweredHashRequest() const { return unansweredHashRequest_; }
+    bool lastTxWasHashResult() const {
+        return lastTxValid_ && lastTxOpcode_ == WARDEN_CMSG_HASH_RESULT;
+    }
+    bool lastRxWasModuleInit() const {
+        return lastRxValid_ && lastRxOpcode_ == WARDEN_SMSG_MODULE_INITIALIZE;
+    }
+    size_t lastCheatResultBytes() const { return lastCheatResultBytes_; }
+
 private:
     void handleWardenData(network::Packet& packet);
     bool loadWardenCRFile(const std::string& moduleHashHex);
+    void mergePublishedCREntries(const std::string& moduleHashHex);
+    void handleModuleInitialize(const std::vector<uint8_t>& decrypted);
+    bool ensureWardenMemoryLoaded();
 
     GameHandler& owner_;
 
@@ -98,9 +120,26 @@ private:
         0xF3, 0xD9, 0xB2, 0xBF, 0x98, 0x8B, 0x7E, 0x71, 0x57
     };
 
-    // Async Warden response: avoids 5-second main-loop stalls from PAGE_A/PAGE_B code pattern searches
-    std::future<std::vector<uint8_t>> wardenPendingEncrypted_;  // encrypted response bytes
+    // Async Warden response: avoids main-loop stalls from PAGE_A/PAGE_B brute-force searches.
+    // Future carries RAW resultData only — checksum + RC4 encrypt happen on the main thread
+    // (OpenSSL SHA1/HMAC are not assumed thread-safe across the game loop).
+    std::future<std::vector<uint8_t>> wardenPendingEncrypted_;
     bool wardenResponsePending_ = false;
+
+    mutable std::recursive_mutex wardenIoMutex_;
+    std::chrono::steady_clock::time_point lastRx_{};
+    std::chrono::steady_clock::time_point lastTx_{};
+    uint8_t lastRxOpcode_ = 0;
+    uint8_t lastTxOpcode_ = 0;
+    std::atomic<bool> unansweredCheatCheck_{false};
+    std::atomic<bool> unansweredHashRequest_{false};
+    size_t lastCheatResultBytes_ = 0;
+    bool lastRxValid_ = false;
+    bool lastTxValid_ = false;
+
+    /** Shared GetTickCount-style ms clock for TIMING + LastHardwareAction pairing. */
+    static uint32_t wardenTickMs();
+    static std::vector<uint8_t> frameCheatChecksResult(const std::vector<uint8_t>& resultData);
 };
 
 } // namespace game

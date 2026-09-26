@@ -29,6 +29,7 @@
 #include "pipeline/wmo_loader.hpp"
 #include "pipeline/wdt_loader.hpp"
 #include "game/game_handler.hpp"
+#include "network/world_socket.hpp"
 #include "game/transport_manager.hpp"
 #include "game/world.hpp"
 
@@ -316,6 +317,7 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
     rendering::LoadingScreen loadingScreen;
     loadingScreen.setVkContext(window_->getVkContext());
     loadingScreen.setSDLWindow(window_->getSDLWindow());
+    loadingScreen.setAssetManager(assetManager_);
     bool loadingScreenOk = loadingScreen.initialize();
 
     auto showProgress = [&](const char* msg, float progress) {
@@ -341,6 +343,22 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
         // own frames. Beat the watchdog so it does not read a healthy load as a hang
         // and force-release the player's mouse capture.
         app_.beatWatchdog();
+        if (gameHandler_) {
+            gameHandler_->pumpWardenIo();
+            static auto lastLoadAlive = std::chrono::steady_clock::now();
+            const auto nowAlive = std::chrono::steady_clock::now();
+            if (nowAlive - lastLoadAlive >= std::chrono::seconds(2)) {
+                lastLoadAlive = nowAlive;
+                std::string traffic = "no socket";
+                int64_t txMs = -1;
+                if (auto* sock = gameHandler_->getSocket()) {
+                    traffic = sock->describeLastTraffic();
+                    txMs = sock->lastOutboundAgeMs();
+                }
+                LOG_WARNING("LOAD ALIVE ", gameHandler_->sessionDiagLabel(),
+                            " status='", msg, "' tx_silence_ms=", txMs, " ", traffic);
+            }
+        }
         if (!loadingScreenOk) return;
         loadingScreen.setStatus(msg);
         loadingScreen.setProgress(progress);
@@ -798,11 +816,13 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
             showProgress("Building collision cache...", 0.88f);
             if (loadingScreenOk) { loadingScreen.render(); window_->swapBuffers(); }
             wmoRenderer->loadFloorCache();
+#ifndef __ANDROID__
             if (wmoRenderer->getFloorCacheSize() == 0) {
                 showProgress("Computing walkable surfaces...", 0.90f);
                 if (loadingScreenOk) { loadingScreen.render(); window_->swapBuffers(); }
                 wmoRenderer->precomputeFloorCache();
             }
+#endif
         }
 
         // Snap player to WMO floor so they don't fall through on first frame
@@ -894,14 +914,27 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
 
             auto startTime = std::chrono::high_resolution_clock::now();
             auto lastProgressTime = startTime;
+#ifdef __ANDROID__
+            const float maxWaitSeconds = 2.0f;
+            const float stallSeconds = 1.5f;
+#else
             const float maxWaitSeconds = 60.0f;
             const float stallSeconds = 10.0f;
+#endif
             int initialRemaining = terrainMgr->getRemainingTileCount();
             if (initialRemaining < 1) initialRemaining = 1;
             int lastRemaining = initialRemaining;
 
-            // Wait until all pending + ready-queue tiles are finalized
+            // Wait until pending tiles finalize — but on Android stop as soon as
+            // the spawn tile exists so cinematic ROOT_ACK is not starved.
             while (terrainMgr->getRemainingTileCount() > 0) {
+#ifdef __ANDROID__
+                if (terrainMgr->getLoadedTileCount() >= 1) {
+                    LOG_INFO("Android: spawn tile ready (", terrainMgr->getLoadedTileCount(),
+                             " tiles), deferring remaining stream in-world");
+                    break;
+                }
+#endif
                 // This loop presents its own frames but never reaches showProgress,
                 // so it must beat the watchdog itself or the whole tile stream reads
                 // as a hung main loop.
@@ -929,6 +962,7 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
                 // Skipping this starves TCP and often kills the VPN tunnel on tablets.
                 if (gameHandler_) {
                     gameHandler_->update(0.016f);
+                    gameHandler_->pumpWardenIo();
                 }
 
                 // Trigger new streaming — enqueue tiles for background workers
@@ -999,11 +1033,13 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
                 showProgress("Building collision cache...", 0.88f);
                 if (loadingScreenOk) { loadingScreen.render(); window_->swapBuffers(); }
                 renderer_->getWMORenderer()->loadFloorCache();
+#ifndef __ANDROID__
                 if (renderer_->getWMORenderer()->getFloorCacheSize() == 0) {
                     showProgress("Computing walkable surfaces...", 0.90f);
                     if (loadingScreenOk) { loadingScreen.render(); window_->swapBuffers(); }
                     renderer_->getWMORenderer()->precomputeFloorCache();
                 }
+#endif
             }
         }
     }
@@ -1076,20 +1112,26 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
         });
     }
 
-    // Keep the loading screen visible until all spawn/equipment/gameobject queues
-    // are fully drained. This ensures the player sees a fully populated world
-    // (character clothed, NPCs placed, game objects loaded) when the screen drops.
+    // Keep the loading screen visible until spawn queues drain — but do not wait
+    // for a city-sized tile ring. First login often has one ADT; requiring 4
+    // tiles plus a 15-yard height match left the Kalimdor loading art up until
+    // Warden kicked (~9s) so the player never saw the world.
     {
-        const float kMinWarmupSeconds = 2.0f;   // minimum time to drain network packets
-        const float kMaxWarmupSeconds = 25.0f;  // hard cap to avoid infinite stall
+#ifdef __ANDROID__
+        const float kMinWarmupSeconds = 0.4f;
+        const float kMaxWarmupSeconds = 8.0f;
+        const int kIdleThreshold = 2;
+        const int kTileFallbackCount = 1;
+        const float kTileFallbackAfter = 1.0f;
+#else
+        const float kMinWarmupSeconds = 2.0f;
+        const float kMaxWarmupSeconds = 25.0f;
+        const int kIdleThreshold = 5;
+        const int kTileFallbackCount = 4;
+        const float kTileFallbackAfter = 5.0f;
+#endif
         const auto warmupStart = std::chrono::high_resolution_clock::now();
-        // Track consecutive idle iterations (all queues empty) to detect convergence
         int idleIterations = 0;
-        const int kIdleThreshold = 5;  // require 5 consecutive empty loops (~80ms)
-        // Throttle for the "ground not ready" debug log below - must be a fresh local
-        // (not static), since a static here would retain its value across separate
-        // warmup calls (e.g. different map loads) and could suppress logging on a
-        // later call for a long time after an earlier call ran close to the hard cap.
         float lastGroundNotReadyLogTime = -1000.0f;
 
         while (true) {
@@ -1111,8 +1153,11 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
                 }
             }
 
-            // Drain network and process deferred spawn/composite queues while hidden.
-            if (gameHandler_) gameHandler_->update(1.0f / 60.0f);
+            // Drain network / Warden while the loading screen is up.
+            if (gameHandler_) {
+                gameHandler_->update(1.0f / 60.0f);
+                gameHandler_->pumpWardenIo();
+            }
 
             // If a new world entry was deferred during packet processing,
             // stop warming up this map — we'll load the new one after cleanup.
@@ -1177,16 +1222,16 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
                         }
                     }
                 }
-                // After 5s with enough tiles loaded, accept terrain as ready even if
-                // the height sample doesn't match spawn Z exactly. This handles cases
-                // where getHeightAt returns a slightly different value than the server's
-                // spawn Z (e.g. terrain LOD, MCNK chunk boundaries, or spawn inside a
-                // building where floor height differs from terrain below).
-                if (!groundReady && elapsed >= 5.0f) {
+                // After a short wait with enough tiles loaded, accept terrain as ready
+                // even if the height sample doesn't match spawn Z. Northshire ADT MCVT
+                // is ~0 while the server spawn Z is ~83, so the 15-yard check never
+                // succeeds on first login with a single tile.
+                if (!groundReady && elapsed >= kTileFallbackAfter) {
                     if (auto* tm = renderer_->getTerrainManager()) {
-                        if (tm->getLoadedTileCount() >= 4) {
+                        if (tm->getLoadedTileCount() >= kTileFallbackCount) {
                             groundReady = true;
-                            LOG_DEBUG("Warmup: using tile-count fallback (", tm->getLoadedTileCount(), " tiles) after ", elapsed, "s");
+                            LOG_INFO("Warmup: using tile-count fallback (", tm->getLoadedTileCount(),
+                                     " tiles) after ", elapsed, "s");
                         }
                     }
                 }
@@ -1232,10 +1277,16 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
     // Ensure all GPU resources (textures, buffers, pipelines) created during
     // world load are fully flushed before the first render frame. Without this,
     // vkCmdBeginRenderPass can crash on NVIDIA 590.x when resources from async
-    // uploads haven't completed their queue operations.
+    // uploads haven't completed their queue operations. Skip on Android — this
+    // can stall for seconds with no main-loop TX (watchdog now heartbeats, but
+    // the wait itself is unnecessary on Mali/Adreno).
+#ifndef __ANDROID__
     if (renderer_ && renderer_->getVkContext()) {
+        if (gameHandler_) gameHandler_->pumpWardenIo();
         vkDeviceWaitIdle(renderer_->getVkContext()->getDevice());
+        if (gameHandler_) gameHandler_->pumpWardenIo();
     }
+#endif
 
     if (loadingScreenOk) {
         loadingScreen.shutdown();

@@ -15,7 +15,7 @@
 
         <TextView
             style="@style/ObsidianSectionSubtitle"
-            android:text="Applied when you press Play. Tuned for Galaxy Tab A9+ landscape." />
+            android:text="Applied when you enter the world. The preset fills the controls below." />
 
         <TextView
             style="@style/ObsidianFieldLabel"
@@ -26,8 +26,8 @@
             android:layout_width="match_parent"
             android:layout_height="48dp"
             android:background="@drawable/bg_secondary_button"
-            android:paddingStart="12dp"
-            android:paddingEnd="12dp" />
+            android:popupBackground="@color/obs_panel"
+            android:spinnerMode="dropdown" />
 
         <LinearLayout
             android:layout_width="match_parent"
@@ -130,6 +130,18 @@
 
                 <TextView
                     style="@style/ObsidianFieldLabel"
+                    android:text="Texture resolution" />
+
+                <Spinner
+                    android:id="@+id/gfx_texture_quality"
+                    android:layout_width="match_parent"
+                    android:layout_height="48dp"
+                    android:background="@drawable/bg_secondary_button"
+                    android:popupBackground="@color/obs_panel"
+                    android:spinnerMode="dropdown" />
+
+                <TextView
+                    style="@style/ObsidianFieldLabel"
                     android:text="Anti-aliasing" />
 
                 <Spinner
@@ -137,8 +149,8 @@
                     android:layout_width="match_parent"
                     android:layout_height="48dp"
                     android:background="@drawable/bg_secondary_button"
-                    android:paddingStart="12dp"
-                    android:paddingEnd="12dp" />
+                    android:popupBackground="@color/obs_panel"
+                    android:spinnerMode="dropdown" />
 
                 <TextView
                     style="@style/ObsidianFieldLabel"

@@ -7,6 +7,7 @@
 struct SDL_Window;
 
 namespace wowee {
+namespace pipeline { class AssetManager; }
 namespace rendering {
 
 class VkContext;
@@ -35,12 +36,15 @@ public:
     // Must be set before initialize() for Vulkan texture upload
     void setVkContext(VkContext* ctx) { vkCtx = ctx; }
     void setSDLWindow(SDL_Window* win) { sdlWindow = win; }
+    void setAssetManager(pipeline::AssetManager* am) { assetManager_ = am; }
 
 private:
     bool loadImage(const std::string& path);
+    bool uploadRgba(const unsigned char* data, int width, int height);
 
     VkContext* vkCtx = nullptr;
     SDL_Window* sdlWindow = nullptr;
+    pipeline::AssetManager* assetManager_ = nullptr;
 
     // Vulkan texture for background image
     VkImage bgImage = VK_NULL_HANDLE;

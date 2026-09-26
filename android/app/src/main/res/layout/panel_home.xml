@@ -15,75 +15,57 @@
 
         <TextView
             style="@style/ObsidianSectionSubtitle"
-            android:text="Set account under Sign in, then press Play to enter the client." />
+            android:paddingBottom="18dp"
+            android:text="Add your 1.12 client under Data, then your server and account under Sign in." />
 
         <LinearLayout
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
             android:background="@drawable/bg_panel_card"
             android:orientation="vertical"
-            android:padding="16dp">
+            android:padding="18dp">
 
             <TextView
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:text="Device"
-                android:textColor="@color/obs_text"
-                android:textSize="16sp"
-                android:textStyle="bold" />
+                android:textAllCaps="true"
+                android:letterSpacing="0.1"
+                android:text="Status"
+                android:textColor="@color/obs_gold"
+                android:textSize="11sp" />
 
             <TextView
                 android:id="@+id/home_device_line"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:paddingTop="6dp"
-                android:textColor="@color/obs_text_muted"
-                android:textSize="14sp" />
+                android:paddingTop="10dp"
+                android:textColor="@color/obs_text"
+                android:textSize="15sp" />
 
             <TextView
                 android:id="@+id/home_data_line"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:paddingTop="10dp"
+                android:paddingTop="8dp"
                 android:textColor="@color/obs_text_muted"
                 android:textSize="14sp" />
+
+            <TextView
+                android:id="@+id/home_realm_line"
+                android:layout_width="match_parent"
+                android:layout_height="wrap_content"
+                android:paddingTop="8dp"
+                android:textColor="@color/obs_gold"
+                android:textSize="15sp"
+                android:textStyle="bold" />
 
             <TextView
                 android:id="@+id/home_hint_line"
                 android:layout_width="match_parent"
                 android:layout_height="wrap_content"
-                android:paddingTop="10dp"
-                android:textColor="@color/obs_ok"
+                android:paddingTop="12dp"
+                android:textColor="@color/obs_accent"
                 android:textSize="14sp" />
-        </LinearLayout>
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:layout_marginTop="14dp"
-            android:orientation="horizontal">
-
-            <Button
-                android:id="@+id/home_open_graphics"
-                android:layout_width="0dp"
-                android:layout_height="48dp"
-                android:layout_marginEnd="8dp"
-                android:layout_weight="1"
-                android:background="@drawable/bg_secondary_button"
-                android:text="Graphics"
-                android:textAllCaps="false"
-                android:textColor="@color/obs_text" />
-
-            <Button
-                android:id="@+id/home_open_paths"
-                android:layout_width="0dp"
-                android:layout_height="48dp"
-                android:layout_marginStart="8dp"
-                android:layout_weight="1"
-                android:background="@drawable/bg_secondary_button"
-                android:text="Sign in"
-                android:textAllCaps="false"
-                android:textColor="@color/obs_text" />
         </LinearLayout>
     </LinearLayout>
 </ScrollView>

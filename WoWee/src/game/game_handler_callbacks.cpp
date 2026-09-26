@@ -317,6 +317,7 @@ void GameHandler::handleAuthResponse(network::Packet& packet) {
     LOG_INFO("========================================");
     LOG_INFO("   WORLD AUTHENTICATION SUCCESSFUL!");
     LOG_INFO("========================================");
+    LOG_INFO("SESSION DIAG ", sessionDiagLabel());
     LOG_INFO("Connected to world server");
     LOG_INFO("Ready for character operations");
 
@@ -591,6 +592,7 @@ void GameHandler::selectCharacter(uint64_t characterGuid) {
     LOG_INFO("========================================");
     LOG_INFO("   ENTERING WORLD");
     LOG_INFO("========================================");
+    LOG_INFO("SESSION DIAG ", sessionDiagLabel());
     LOG_INFO("Character GUID: 0x", std::hex, characterGuid, std::dec);
 
     // Find character name for logging
@@ -784,6 +786,7 @@ void GameHandler::handleLoginVerifyWorld(network::Packet& packet) {
     LOG_INFO("========================================");
     LOG_INFO("   SUCCESSFULLY ENTERED WORLD!");
     LOG_INFO("========================================");
+    LOG_INFO("SESSION DIAG ", sessionDiagLabel());
     LOG_INFO("Map ID: ", data.mapId);
     LOG_INFO("Position: (", data.x, ", ", data.y, ", ", data.z, ")");
     LOG_INFO("Orientation: ", data.orientation, " radians");

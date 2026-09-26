@@ -75,6 +75,9 @@ private:
 #ifdef __ANDROID__
     bool androidAutoLoginStarted_ = false;
     bool androidAuthExitRequested_ = false;
+    // First headless frame only paints the splash; DNS/connect run on the next
+    // frame so "Starting..." cannot hide a blocking getaddrinfo.
+    bool androidConnectDeferred_ = false;
 #endif
 
     // Status

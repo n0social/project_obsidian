@@ -3,13 +3,15 @@
     <item android:state_pressed="true">
         <shape android:shape="rectangle">
             <solid android:color="@color/obs_accent_pressed" />
-            <corners android:radius="12dp" />
+            <corners android:radius="3dp" />
+            <stroke android:width="1dp" android:color="@color/obs_gold_dim" />
         </shape>
     </item>
     <item>
         <shape android:shape="rectangle">
             <solid android:color="@color/obs_accent" />
-            <corners android:radius="12dp" />
+            <corners android:radius="3dp" />
+            <stroke android:width="1dp" android:color="@color/obs_gold" />
         </shape>
     </item>
 </selector>

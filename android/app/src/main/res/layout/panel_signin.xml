@@ -18,40 +18,7 @@
 
         <TextView
             style="@style/ObsidianSectionSubtitle"
-            android:text="Realm auth host + account. Use .org for RetroWoW (not .rg / .com)." />
-
-        <TextView
-            style="@style/ObsidianFieldLabel"
-            android:text="Presets" />
-
-        <LinearLayout
-            android:layout_width="match_parent"
-            android:layout_height="wrap_content"
-            android:orientation="horizontal">
-
-            <Button
-                android:id="@+id/signin_preset_retro"
-                android:layout_width="0dp"
-                android:layout_height="44dp"
-                android:layout_weight="1"
-                android:background="@drawable/bg_secondary_button"
-                android:text="RetroWoW"
-                android:textAllCaps="false"
-                android:textColor="@color/obs_text"
-                android:textSize="13sp" />
-
-            <Button
-                android:id="@+id/signin_preset_twinstar"
-                android:layout_width="0dp"
-                android:layout_height="44dp"
-                android:layout_marginStart="8dp"
-                android:layout_weight="1"
-                android:background="@drawable/bg_secondary_button"
-                android:text="TwinStar / Kronos"
-                android:textAllCaps="false"
-                android:textColor="@color/obs_text"
-                android:textSize="13sp" />
-        </LinearLayout>
+            android:text="Hostname and port of your server. Enter World saves this." />
 
         <TextView
             style="@style/ObsidianFieldLabel"
@@ -62,7 +29,7 @@
             android:layout_width="match_parent"
             android:layout_height="48dp"
             android:background="@drawable/bg_edit_text"
-            android:hint="logon.retro-wow.org"
+            android:hint="auth.example.com"
             android:inputType="textUri"
             android:paddingStart="12dp"
             android:paddingEnd="12dp"
@@ -159,7 +126,7 @@
         <TextView
             android:layout_width="match_parent"
             android:layout_height="wrap_content"
-            android:text="Press Play in the left rail to enter the client (realm list → characters → world)."
+            android:text="Use the account for this server."
             android:textColor="@color/obs_text_muted"
             android:textSize="14sp" />
     </LinearLayout>

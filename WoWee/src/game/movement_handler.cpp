@@ -355,6 +355,8 @@ void MovementHandler::handleClientControlUpdate(network::Packet& packet) {
         }
     }
     bool allowMovement = (packet.readUInt8() != 0);
+    LOG_WARNING("SMSG_CLIENT_CONTROL_UPDATE guid=0x", std::hex, controlGuid, std::dec,
+                " allowMovement=", allowMovement ? 1 : 0);
     if (controlGuid == 0 || controlGuid == owner_.getPlayerGuid()) {
         bool changed = (serverMovementAllowed_ != allowMovement);
         serverMovementAllowed_ = allowMovement;
@@ -1029,6 +1031,8 @@ void MovementHandler::handleForceMoveRootState(network::Packet& packet, bool roo
     Opcode ackOp = rooted ? Opcode::CMSG_FORCE_MOVE_ROOT_ACK : Opcode::CMSG_FORCE_MOVE_UNROOT_ACK;
     if (wireOpcode(ackOp) == 0xFFFF) return;
     owner_.getSocket()->send(buildForceAck(ackOp, counter));
+    LOG_WARNING(rooted ? "Sent CMSG_FORCE_MOVE_ROOT_ACK" : "Sent CMSG_FORCE_MOVE_UNROOT_ACK",
+                " counter=", counter, " guid=0x", std::hex, guid, std::dec);
 }
 
 void MovementHandler::handleForceMoveFlagChange(network::Packet& packet, const char* name,

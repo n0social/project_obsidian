@@ -22,12 +22,12 @@
 
     <style name="ObsidianRailButton" parent="@android:style/Widget.DeviceDefault.Button.Borderless">
         <item name="android:layout_width">match_parent</item>
-        <item name="android:layout_height">52dp</item>
+        <item name="android:layout_height">48dp</item>
         <item name="android:gravity">center_vertical|start</item>
-        <item name="android:paddingStart">20dp</item>
-        <item name="android:paddingEnd">16dp</item>
+        <item name="android:paddingStart">16dp</item>
+        <item name="android:paddingEnd">12dp</item>
         <item name="android:textAllCaps">false</item>
-        <item name="android:textSize">16sp</item>
+        <item name="android:textSize">15sp</item>
         <item name="android:textColor">@color/obs_text</item>
         <item name="android:background">@drawable/bg_rail_button</item>
     </style>
@@ -36,8 +36,9 @@
         <item name="android:layout_width">match_parent</item>
         <item name="android:layout_height">wrap_content</item>
         <item name="android:textColor">@color/obs_text</item>
-        <item name="android:textSize">26sp</item>
+        <item name="android:textSize">28sp</item>
         <item name="android:textStyle">bold</item>
+        <item name="android:letterSpacing">0.04</item>
         <item name="android:paddingBottom">4dp</item>
     </style>
 
@@ -52,9 +53,11 @@
     <style name="ObsidianFieldLabel">
         <item name="android:layout_width">match_parent</item>
         <item name="android:layout_height">wrap_content</item>
-        <item name="android:textColor">@color/obs_text_muted</item>
-        <item name="android:textSize">13sp</item>
-        <item name="android:paddingTop">10dp</item>
+        <item name="android:textColor">@color/obs_gold</item>
+        <item name="android:textSize">11sp</item>
+        <item name="android:textAllCaps">true</item>
+        <item name="android:letterSpacing">0.08</item>
+        <item name="android:paddingTop">12dp</item>
         <item name="android:paddingBottom">4dp</item>
     </style>
 </resources>

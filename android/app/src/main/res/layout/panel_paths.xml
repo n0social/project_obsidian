@@ -11,15 +11,15 @@
 
         <TextView
             style="@style/ObsidianSectionTitle"
-            android:text="Data / Paths" />
+            android:text="Data" />
 
         <TextView
             style="@style/ObsidianSectionSubtitle"
-            android:text="Extracted Vanilla 1.12.1 assets only — no MPQs in the APK." />
+            android:text="Do one of these. Extract a 1.12.1 folder, or import a folder you already unpacked on a PC." />
 
         <TextView
             style="@style/ObsidianFieldLabel"
-            android:text="Data directory" />
+            android:text="App data directory" />
 
         <TextView
             android:id="@+id/paths_data_dir"
@@ -40,8 +40,81 @@
             android:textSize="14sp" />
 
         <TextView
-            style="@style/ObsidianSectionSubtitle"
+            android:id="@+id/paths_extractor_status"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingTop="4dp"
+            android:textColor="@color/obs_gold"
+            android:textSize="13sp" />
+
+        <TextView
+            style="@style/ObsidianFieldLabel"
             android:layout_marginTop="16dp"
-            android:text="Realm host and account live under Sign in." />
+            android:text="Extract a client folder" />
+
+        <TextView
+            style="@style/ObsidianSectionSubtitle"
+            android:text="Choose the folder that contains Data and the MPQ archives. Keep the app open. A full extract can take 10–30 minutes." />
+
+        <Button
+            android:id="@+id/paths_pick_client"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:layout_marginTop="8dp"
+            android:background="@drawable/bg_primary_button"
+            android:text="Select WoW client folder and extract"
+            android:textAllCaps="false"
+            android:textColor="@color/obs_text"
+            android:textStyle="bold" />
+
+        <TextView
+            style="@style/ObsidianFieldLabel"
+            android:layout_marginTop="18dp"
+            android:text="Or import an unpacked folder" />
+
+        <TextView
+            style="@style/ObsidianSectionSubtitle"
+            android:text="Use this instead of extract when the folder already contains manifest.json." />
+
+        <Button
+            android:id="@+id/paths_import_extracted"
+            android:layout_width="match_parent"
+            android:layout_height="48dp"
+            android:layout_marginTop="8dp"
+            android:background="@drawable/bg_secondary_button"
+            android:text="Import extracted Data"
+            android:textAllCaps="false"
+            android:textColor="@color/obs_text" />
+
+        <ProgressBar
+            android:id="@+id/paths_progress"
+            style="?android:attr/progressBarStyleHorizontal"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:layout_marginTop="12dp"
+            android:indeterminate="false"
+            android:max="100"
+            android:progress="0"
+            android:visibility="gone" />
+
+        <TextView
+            android:id="@+id/paths_progress_label"
+            android:layout_width="match_parent"
+            android:layout_height="wrap_content"
+            android:paddingTop="6dp"
+            android:textColor="@color/obs_text_muted"
+            android:textSize="13sp"
+            android:visibility="gone" />
+
+        <Button
+            android:id="@+id/paths_cancel"
+            android:layout_width="match_parent"
+            android:layout_height="44dp"
+            android:layout_marginTop="8dp"
+            android:background="@drawable/bg_secondary_button"
+            android:text="Cancel"
+            android:textAllCaps="false"
+            android:textColor="@color/obs_danger"
+            android:visibility="gone" />
     </LinearLayout>
 </ScrollView>

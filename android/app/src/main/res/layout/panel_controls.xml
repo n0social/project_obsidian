@@ -42,8 +42,8 @@
             android:layout_width="match_parent"
             android:layout_height="48dp"
             android:background="@drawable/bg_secondary_button"
-            android:paddingStart="12dp"
-            android:paddingEnd="12dp" />
+            android:popupBackground="@color/obs_panel"
+            android:spinnerMode="dropdown" />
 
         <TextView
             android:layout_width="match_parent"

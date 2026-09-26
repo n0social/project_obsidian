@@ -3,6 +3,8 @@
 #include <chrono>
 #include <fstream>
 #include <cstring>
+#include <cctype>
+#include <cstdio>
 #include <cstdlib>
 #include <algorithm>
 #include <filesystem>
@@ -302,6 +304,113 @@ void WardenMemory::writeLE32(uint32_t va, uint32_t value) {
     image_[rva+3] = (value >> 24) & 0xFF;
 }
 
+void WardenMemory::addOverlay(uint32_t va, const uint8_t* data, size_t len) {
+    if (!data || len == 0) return;
+    for (auto& o : overlays_) {
+        if (o.va == va) {
+            o.bytes.assign(data, data + len);
+            return;
+        }
+    }
+    overlays_.push_back(OverlaySpan{va, std::vector<uint8_t>(data, data + len)});
+}
+
+bool WardenMemory::readOverlay(uint32_t va, uint8_t length, uint8_t* outBuf) const {
+    if (length == 0) return true;
+    for (const auto& o : overlays_) {
+        if (va >= o.va &&
+            static_cast<uint64_t>(va) + length <= static_cast<uint64_t>(o.va) + o.bytes.size()) {
+            std::memcpy(outBuf, o.bytes.data() + (va - o.va), length);
+            return true;
+        }
+    }
+    return false;
+}
+
+bool WardenMemory::coversOverlay(uint32_t va, uint8_t length) const {
+    if (length == 0) return false;
+    for (const auto& o : overlays_) {
+        if (va >= o.va &&
+            static_cast<uint64_t>(va) + length <= static_cast<uint64_t>(o.va) + o.bytes.size()) {
+            return true;
+        }
+    }
+    return false;
+}
+
+static int hexNibble(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return c - 'a' + 10;
+    if (c >= 'A' && c <= 'F') return c - 'A' + 10;
+    return -1;
+}
+
+void WardenMemory::loadOverlaysFromFile(const std::string& exePath) {
+    std::vector<std::string> candidates;
+    if (!exePath.empty()) {
+        std::filesystem::path p(exePath);
+        candidates.push_back((p.parent_path() / "warden_overlays.txt").string());
+    }
+    if (const char* env = std::getenv("WOWEE_INTEGRITY_DIR")) {
+        if (env && *env) {
+            std::filesystem::path d(env);
+            candidates.push_back((d / "warden_overlays.txt").string());
+        }
+    }
+    candidates.push_back("Data/misc/warden_overlays.txt");
+    candidates.push_back("warden_cache/warden_overlays.txt");
+    candidates.push_back("./warden_cache/warden_overlays.txt");
+
+    std::string used;
+    std::ifstream in;
+    for (const auto& path : candidates) {
+        in.open(path);
+        if (in.is_open()) {
+            used = path;
+            break;
+        }
+        in.clear();
+    }
+    if (!in.is_open()) return;
+
+    int loaded = 0;
+    std::string line;
+    while (std::getline(in, line)) {
+        auto hashPos = line.find('#');
+        if (hashPos != std::string::npos) line = line.substr(0, hashPos);
+        if (line.empty()) continue;
+        std::istringstream ss(line);
+        std::string vaHex;
+        ss >> vaHex;
+        if (vaHex.empty()) continue;
+        uint32_t va = 0;
+        try {
+            va = static_cast<uint32_t>(std::stoul(vaHex, nullptr, 16));
+        } catch (...) {
+            continue;
+        }
+        std::string rest;
+        std::getline(ss, rest);
+        std::vector<uint8_t> bytes;
+        for (size_t i = 0; i < rest.size();) {
+            while (i < rest.size() && std::isspace(static_cast<unsigned char>(rest[i]))) ++i;
+            if (i + 1 >= rest.size()) break;
+            int hi = hexNibble(rest[i]);
+            int lo = hexNibble(rest[i + 1]);
+            if (hi < 0 || lo < 0) {
+                ++i;
+                continue;
+            }
+            bytes.push_back(static_cast<uint8_t>((hi << 4) | lo));
+            i += 2;
+        }
+        if (bytes.empty()) continue;
+        addOverlay(va, bytes.data(), bytes.size());
+        ++loaded;
+    }
+    LOG_WARNING("WardenMemory: Loaded ", loaded, " overlay span(s) from ", used);
+}
+
 void WardenMemory::patchRuntimeGlobals() {
     if (imageBase_ != 0x00400000) {
         LOG_WARNING("WardenMemory: unexpected imageBase=0x", std::hex, imageBase_, std::dec,
@@ -388,25 +497,42 @@ void WardenMemory::patchRuntimeGlobals() {
     constexpr uint32_t GX_DEVICE_PTR = 0xC0ED38;
     constexpr uint32_t FAKE_DEVICE   = 0xCE8400;
     writeLE32(GX_DEVICE_PTR, FAKE_DEVICE);
-    writeLE32(FAKE_DEVICE + 0x1FC, 0);  // OpenGL — skip EndScene locate/MEM
-    // Keep a inert D3D-looking chain in case an older scan still walks it,
-    // but park EndScene in BSS with a benign stub (never WoW .text).
+    writeLE32(FAKE_DEVICE + 0x1FC, 0);  // OpenGL — VMaNGOS stage 1.5 skips EndScene
+    // RetroWoW walks the D3D chain unconditionally (device+0x38A8 → vt1 → vt1+0 →
+    // vt2+0xA8 → EndScene) with NO api-kind gate. It then MEM-checks 16 bytes at
+    // the resolved address. Advertising a random Wow.exe prologue (0x401030)
+    // got peer_closed ~6.5s after that reply. An overlay catalog serves exact
+    // bytes at a d3d9-like VA outside Wow.exe so PAGE hashes of .text stay intact
+    // and the follow-up MEM is not a random client function. Optional
+    // warden_overlays.txt next to WoW.exe can replace these bytes with a dump
+    // from a real PC client.
     constexpr uint32_t FAKE_VTABLE1 = 0xCE8500;
     constexpr uint32_t FAKE_VTABLE2 = 0xCE8600;
-    constexpr uint32_t FAKE_ENDSCENE = 0xCE8800;
+    constexpr uint32_t kFakeD3d9EndScene = 0x6A010000;
+    static constexpr uint8_t kEndSceneStub[32] = {
+        // Win7 SP1 d3d9.dll 6.1.7601.17514, IDirect3DDevice9 vtable slot 42.
+        0x8B, 0xFF, 0x55, 0x8B, 0xEC, 0x6A, 0xFF, 0x68,
+        0xFC, 0xAD, 0x5A, 0x75, 0x64, 0xA1, 0x00, 0x00,
+        0x00, 0x00, 0x50, 0x83, 0xEC, 0x14, 0x53, 0x56,
+        0x57, 0xA1, 0x50, 0x92, 0x5B, 0x75, 0x33, 0xC5
+    };
+    addOverlay(kFakeD3d9EndScene, kEndSceneStub, sizeof(kEndSceneStub));
+    const uint32_t endSceneVa = kFakeD3d9EndScene;
     writeLE32(FAKE_DEVICE + 0x38A8, FAKE_VTABLE1);
     writeLE32(FAKE_VTABLE1, FAKE_VTABLE2);
-    writeLE32(FAKE_VTABLE2 + 0xA8, FAKE_ENDSCENE);
-    // Minimal x86 ret stub so a stray MEM_CHECK of EndScene isn't .text noise.
+    writeLE32(FAKE_VTABLE2 + 0xA8, endSceneVa);
     {
-        uint32_t endRva = FAKE_ENDSCENE - imageBase_;
-        if (endRva + 16 <= imageSize_) {
-            static constexpr uint8_t kEndSceneStub[16] = {
-                0x33, 0xC0, 0xC3, 0x90, 0x90, 0x90, 0x90, 0x90,
-                0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90, 0x90
-            };
-            std::memcpy(image_.data() + endRva, kEndSceneStub, sizeof(kEndSceneStub));
+        uint8_t endBytesRaw[16] = {};
+        std::string endBytes;
+        if (readOverlay(endSceneVa, 16, endBytesRaw)) {
+            for (int i = 0; i < 16; ++i) {
+                char s[4];
+                snprintf(s, 4, "%02x ", endBytesRaw[i]);
+                endBytes += s;
+            }
         }
+        LOG_WARNING("WardenMemory: EndScene overlay VA=0x", std::hex, endSceneVa, std::dec,
+                    " bytes=[", endBytes, "]");
     }
     for (uint32_t off = 0x3800; off <= 0x3A00; off += 4) {
         uint32_t addr = FAKE_DEVICE + off;
@@ -414,8 +540,11 @@ void WardenMemory::patchRuntimeGlobals() {
             writeLE32(addr, FAKE_VTABLE1);
         }
     }
+    // Also pin API kind at a few nearby offsets some forks probe.
+    writeLE32(FAKE_DEVICE + 0x1F8, 0);
+    writeLE32(FAKE_DEVICE + 0x200, 0);
     LOG_WARNING("WardenMemory: Patched GX device @0x", std::hex, GX_DEVICE_PTR,
-                " API=OpenGL (EndScene skipped)", std::dec);
+                " API=OpenGL EndScene=0x", endSceneVa, std::dec);
 
     // WorldEnables
     constexpr uint32_t WORLD_ENABLES = 0xC7B2A4;
@@ -584,6 +713,10 @@ void WardenMemory::patchTurtleWowBinary() {
 bool WardenMemory::readMemory(uint32_t va, uint8_t length, uint8_t* outBuf) const {
     if (length == 0) return true;
 
+    if (readOverlay(va, length, outBuf)) {
+        return true;
+    }
+
     // KUSER_SHARED_DATA range
     if (va >= KUSER_BASE && static_cast<uint64_t>(va) + length <= KUSER_BASE + KUSER_SIZE) {
         std::memcpy(outBuf, kuserData_ + (va - KUSER_BASE), length);
@@ -732,6 +865,7 @@ bool WardenMemory::loadFromFile(const std::string& exePath) {
 
     initKuserSharedData();
     patchRuntimeGlobals();
+    loadOverlaysFromFile(exePath);
     if (isTurtle_ && imageSize_ != 0x00906000) {
         // Only apply TurtlePatcher patches if we loaded the vanilla exe.
         // The real Turtle WoW.exe (imageSize=0x906000) already has these bytes.

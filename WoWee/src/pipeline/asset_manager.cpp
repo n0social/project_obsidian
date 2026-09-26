@@ -44,6 +44,22 @@ size_t parseEnvCount(const char* name, size_t defValue) {
     }
     return static_cast<size_t>(n);
 }
+
+void applyTextureMaxDim(BLPImage& image) {
+    // 0 / unset = no downsample. Tablet builds set WOWEE_MAX_TEX_DIM (e.g. 512/1024).
+    const char* v = std::getenv("WOWEE_MAX_TEX_DIM");
+    if (!v || !*v) return;
+    char* end = nullptr;
+    long dim = std::strtol(v, &end, 10);
+    if (end == v || dim <= 0) return;
+    const int beforeW = image.width;
+    const int beforeH = image.height;
+    BLPLoader::downsampleToMaxDim(image, static_cast<int>(dim));
+    if (image.width != beforeW || image.height != beforeH) {
+        LOG_DEBUG("Texture downsampled ", beforeW, "x", beforeH, " -> ",
+                  image.width, "x", image.height, " (max=", dim, ")");
+    }
+}
 } // namespace
 
 AssetManager::AssetManager() = default;
@@ -152,8 +168,16 @@ void AssetManager::shutdown() {
 }
 
 std::string AssetManager::resolveFile(const std::string& normalizedPath) const {
-    // Check override directory first (for HD upgrades, custom textures)
+    // Check override directory first (HD upgrades, Obsidian UI, user edits).
+    // Direct path wins even when the file is not in manifest.json — extract
+    // must never be able to hide a file that lives under Data/override.
     if (!overridePath_.empty()) {
+        std::string rel = normalizedPath;
+        std::replace(rel.begin(), rel.end(), '\\', '/');
+        const std::string direct = overridePath_ + "/" + rel;
+        if (LooseFileReader::fileExists(direct)) {
+            return direct;
+        }
         const auto* entry = manifest_.lookup(normalizedPath);
         if (entry && !entry->filesystemPath.empty()) {
             std::string overrideFsPath = overridePath_ + "/" + entry->filesystemPath;
@@ -216,6 +240,7 @@ BLPImage AssetManager::loadTexture(const std::string& path) {
     // Check for PNG override
     BLPImage pngImage = tryLoadPngOverride(normalizedPath);
     if (pngImage.isValid()) {
+        applyTextureMaxDim(pngImage);
         return pngImage;
     }
 
@@ -257,6 +282,7 @@ BLPImage AssetManager::loadTexture(const std::string& path) {
         return BLPImage();
     }
 
+    applyTextureMaxDim(image);
     LOG_DEBUG("Loaded texture: ", normalizedPath, " (", image.width, "x", image.height, ")");
     return image;
 }
@@ -273,6 +299,16 @@ BLPImage AssetManager::tryLoadPngOverride(const std::string& normalizedPath) con
     if (!fsPath.empty() && fsPath.size() >= 4) {
         pngPath = fsPath.substr(0, fsPath.size() - 4) + ".png";
         if (!LooseFileReader::fileExists(pngPath)) pngPath.clear();
+    }
+
+    // Protected override folder: Data/override/<wow path>.png always wins.
+    if (pngPath.empty() && !overridePath_.empty()) {
+        std::string rel = normalizedPath;
+        std::replace(rel.begin(), rel.end(), '\\', '/');
+        if (rel.size() >= 4) {
+            std::string candidate = overridePath_ + "/" + rel.substr(0, rel.size() - 4) + ".png";
+            if (LooseFileReader::fileExists(candidate)) pngPath = std::move(candidate);
+        }
     }
 
     // Fallback: probe well-known custom-zone texture roots so that PNG-only

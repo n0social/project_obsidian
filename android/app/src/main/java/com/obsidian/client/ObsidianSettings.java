@@ -33,9 +33,13 @@ public final class ObsidianSettings {
     public static final String KEY_ORIENTATION = "orientation";
     public static final String KEY_REALM_HOST = "realm_host";
     public static final String KEY_REALM_PORT = "realm_port";
+    /** One-shot so old RetroWoW/Kronos presets are cleared and not reapplied. */
+    private static final String KEY_REALM_PRESETS_REMOVED = "realm_presets_removed";
     public static final String KEY_ACCOUNT_USER = "account_user";
     public static final String KEY_ACCOUNT_PASS = "account_pass";
     public static final String KEY_AUTH_ERROR = "auth_error";
+    /** 0=Full, 1=High(1024), 2=Medium(512), 3=Low(256) — maps to WOWEE_MAX_TEX_DIM */
+    public static final String KEY_TEXTURE_QUALITY = "texture_quality";
 
     private ObsidianSettings() {}
 
@@ -62,18 +66,22 @@ public final class ObsidianSettings {
         if (!p.contains(KEY_RELATIVE_MOUSE)) e.putBoolean(KEY_RELATIVE_MOUSE, false);
         if (!p.contains(KEY_KEEP_SCREEN_ON)) e.putBoolean(KEY_KEEP_SCREEN_ON, true);
         if (!p.contains(KEY_ORIENTATION)) e.putString(KEY_ORIENTATION, "landscape");
-        if (!p.contains(KEY_REALM_HOST)) e.putString(KEY_REALM_HOST, "logon.retro-wow.org");
+        // Default Medium textures on tablets — softens look, cuts VRAM hard.
+        if (!p.contains(KEY_TEXTURE_QUALITY)) e.putInt(KEY_TEXTURE_QUALITY, 2);
+        if (!p.contains(KEY_REALM_HOST)) e.putString(KEY_REALM_HOST, "");
         if (!p.contains(KEY_REALM_PORT)) e.putInt(KEY_REALM_PORT, 3724);
 
-        // Migrate common RetroWoW typos / old localhost default on tablets.
-        String host = p.getString(KEY_REALM_HOST, "logon.retro-wow.org");
-        String lower = host == null ? "" : host.trim().toLowerCase(Locale.US);
-        if (lower.isEmpty()
-                || "localhost".equals(lower)
-                || "127.0.0.1".equals(lower)
-                || "logon.retro-wow.rg".equals(lower)
-                || "logon.retro-wow.com".equals(lower)) {
-            e.putString(KEY_REALM_HOST, "logon.retro-wow.org");
+        if (!p.getBoolean(KEY_REALM_PRESETS_REMOVED, false)) {
+            String host = p.getString(KEY_REALM_HOST, "");
+            String lower = host == null ? "" : host.trim().toLowerCase(Locale.US);
+            if (lower.contains("retro-wow")
+                    || lower.contains("twinstar")
+                    || lower.contains("kronos")
+                    || "localhost".equals(lower)
+                    || "127.0.0.1".equals(lower)) {
+                e.putString(KEY_REALM_HOST, "");
+            }
+            e.putBoolean(KEY_REALM_PRESETS_REMOVED, true);
         }
         e.apply();
     }
@@ -90,7 +98,8 @@ public final class ObsidianSettings {
                         .putBoolean(KEY_NORMAL, false)
                         .putBoolean(KEY_POM, false)
                         .putBoolean(KEY_WATER, false)
-                        .putInt(KEY_CLUTTER, 25);
+                        .putInt(KEY_CLUTTER, 25)
+                        .putInt(KEY_TEXTURE_QUALITY, 3);
                 break;
             case 3: // High
                 e.putBoolean(KEY_SHADOWS, true)
@@ -101,7 +110,8 @@ public final class ObsidianSettings {
                         .putBoolean(KEY_NORMAL, true)
                         .putBoolean(KEY_POM, true)
                         .putBoolean(KEY_WATER, true)
-                        .putInt(KEY_CLUTTER, 130);
+                        .putInt(KEY_CLUTTER, 130)
+                        .putInt(KEY_TEXTURE_QUALITY, 1);
                 break;
             case 4: // Ultra
                 e.putBoolean(KEY_SHADOWS, true)
@@ -112,7 +122,8 @@ public final class ObsidianSettings {
                         .putBoolean(KEY_NORMAL, true)
                         .putBoolean(KEY_POM, true)
                         .putBoolean(KEY_WATER, true)
-                        .putInt(KEY_CLUTTER, 150);
+                        .putInt(KEY_CLUTTER, 150)
+                        .putInt(KEY_TEXTURE_QUALITY, 0);
                 break;
             case 2: // Medium
             default:
@@ -124,7 +135,8 @@ public final class ObsidianSettings {
                         .putBoolean(KEY_NORMAL, true)
                         .putBoolean(KEY_POM, true)
                         .putBoolean(KEY_WATER, true)
-                        .putInt(KEY_CLUTTER, 100);
+                        .putInt(KEY_CLUTTER, 100)
+                        .putInt(KEY_TEXTURE_QUALITY, 2);
                 break;
         }
         e.apply();
@@ -166,8 +178,20 @@ public final class ObsidianSettings {
             w.write("music_volume=" + p.getInt(KEY_MUSIC, 30) + "\n");
             w.write("mute_login_music=" + (p.getBoolean(KEY_MUTE_LOGIN, true) ? "1" : "0") + "\n");
             w.write("relative_mouse=" + (p.getBoolean(KEY_RELATIVE_MOUSE, true) ? "1" : "0") + "\n");
-            w.write("realm_host=" + p.getString(KEY_REALM_HOST, "logon.retro-wow.org") + "\n");
+            w.write("texture_quality=" + p.getInt(KEY_TEXTURE_QUALITY, 2) + "\n");
+            w.write("realm_host=" + p.getString(KEY_REALM_HOST, "") + "\n");
             w.write("realm_port=" + p.getInt(KEY_REALM_PORT, 3724) + "\n");
+        }
+    }
+
+    /** Longest texture edge for WOWEE_MAX_TEX_DIM; 0 = full resolution. */
+    public static int textureMaxDim(SharedPreferences p) {
+        switch (p.getInt(KEY_TEXTURE_QUALITY, 2)) {
+            case 0: return 0;      // Full
+            case 1: return 1024;   // High
+            case 3: return 256;    // Low
+            case 2:
+            default: return 512;   // Medium — Tab A9+ default
         }
     }
 

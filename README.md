@@ -81,9 +81,10 @@ These are the current blockers. We are actively debugging and fixing them before
 
 - **World disconnect shortly after Enter World** — server closes the socket (`peer_closed`), most often after Warden cheat-check / memory integrity replies. Maiev string-hash and HASH_REQUEST CR tables are improved; EndScene / MEM-check accuracy is still being hardened.
 - **Character hair missing or wrong in-world** — char-select vs world geoset/texture paths differed; scalp overlays and hair connectors are being aligned with the classic CharSections / CharHairGeosets flow.
-- **Occasional login / realm / create-flow glitches** — wrong screen skips, create preview quirks, or body proportion issues on some races/sexes. 
+- **On-device client prepare** — Under Data, extract a 1.12.1 client folder or import a folder that already has manifest.json. Enter World saves the realm host typed under Sign in. Large extracts need free storage and time.
+- **Occasional login / realm / create-flow glitches** — wrong screen skips, create preview quirks, or body proportion issues on some races/sexes.
 
-If you hit something not listed here, open an issue with device model, realm, and a `wowee.log` snippet.
+Memory note: Graphics → **Texture resolution** downsamples at load time (default Medium/512 on tablet). That softens textures and cuts RAM — it does **not** tear meshes.
 
 ## What’s next (after the blockers above)
 

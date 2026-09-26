@@ -28,11 +28,17 @@ public:
 
     /**
      * Read bytes from virtual address space.
-     * Handles PE sections + KUSER_SHARED_DATA mock.
+     * Handles overlay catalog, PE sections, and KUSER_SHARED_DATA mock.
      */
     bool readMemory(uint32_t va, uint8_t length, uint8_t* outBuf) const;
 
     bool isLoaded() const { return loaded_; }
+
+    /** Exact VA→bytes overlay (d3d9 EndScene, captured PC dumps). Replaces same VA. */
+    void addOverlay(uint32_t va, const uint8_t* data, size_t len);
+
+    /** True if [va, va+len) is served from an overlay, not Wow.exe. */
+    bool coversOverlay(uint32_t va, uint8_t length) const;
 
     /**
      * Search PE image for a byte pattern matching HMAC-SHA1(seed, pattern).
@@ -62,12 +68,20 @@ private:
     static constexpr uint32_t KUSER_SIZE = 0x1000;
     uint8_t kuserData_[KUSER_SIZE] = {};
 
+    struct OverlaySpan {
+        uint32_t va = 0;
+        std::vector<uint8_t> bytes;
+    };
+
     bool parsePE(const std::vector<uint8_t>& fileData);
     void initKuserSharedData();
     void patchRuntimeGlobals();
     void patchTurtleWowBinary();
     void verifyWardenScanEntries();
+    void loadOverlaysFromFile(const std::string& exePath);
+    bool readOverlay(uint32_t va, uint8_t length, uint8_t* outBuf) const;
     bool isTurtle_ = false;
+    std::vector<OverlaySpan> overlays_;
     std::string findWowExe(uint16_t build) const;
     static uint32_t expectedImageSizeForBuild(uint16_t build, bool isTurtle);
 

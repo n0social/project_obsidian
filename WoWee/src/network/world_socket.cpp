@@ -13,6 +13,11 @@
 #include <cstring>
 #include <chrono>
 #include <thread>
+#include <iterator>
+
+#ifdef _WIN32
+#include <mstcpip.h>
+#endif
 
 namespace {
 constexpr size_t kMaxReceiveBufferBytes = 8 * 1024 * 1024;
@@ -31,6 +36,77 @@ constexpr size_t kMaxQueuedPacketCallbacks = 4096;
 constexpr int kAsyncPumpSleepMs = 2;
 constexpr size_t kRecentPacketHistoryLimit = 96;
 constexpr auto kRecentPacketHistoryWindow = std::chrono::seconds(15);
+constexpr uint16_t kSmsgWardenData = 0x2E6;
+
+inline bool isWardenSmsg(uint16_t opcode) {
+    return opcode == kSmsgWardenData;
+}
+
+// Packets the server times out if we sit on a loading screen without ACKing.
+// Watchdog must dispatch these with Warden — FORCE_MOVE_ROOT/UNROOT are the
+// intro-cinematic handshake Kronos sends at Northshire login.
+inline bool isStayAliveSmsg(uint16_t opcode) {
+    using LO = wowee::game::LogicalOpcode;
+    auto match = [opcode](LO op) {
+        const uint16_t wire = wowee::game::wireOpcode(op);
+        return wire != 0xFFFF && wire == opcode;
+    };
+    return match(LO::SMSG_FORCE_MOVE_ROOT)
+        || match(LO::SMSG_FORCE_MOVE_UNROOT)
+        || match(LO::SMSG_CLIENT_CONTROL_UPDATE)
+        || match(LO::SMSG_TRIGGER_CINEMATIC)
+        || match(LO::SMSG_FORCE_RUN_SPEED_CHANGE)
+        || match(LO::SMSG_FORCE_RUN_BACK_SPEED_CHANGE)
+        || match(LO::SMSG_FORCE_SWIM_SPEED_CHANGE)
+        || match(LO::SMSG_FORCE_SWIM_BACK_SPEED_CHANGE)
+        || match(LO::SMSG_FORCE_WALK_SPEED_CHANGE)
+        || match(LO::SMSG_FORCE_TURN_RATE_CHANGE)
+        || match(LO::SMSG_FORCE_FLIGHT_SPEED_CHANGE)
+        || match(LO::SMSG_FORCE_FLIGHT_BACK_SPEED_CHANGE)
+        || match(LO::SMSG_MOVE_KNOCK_BACK);
+}
+
+inline bool isUrgentSmsg(uint16_t opcode) {
+    return isWardenSmsg(opcode) || isStayAliveSmsg(opcode);
+}
+
+void applyTcpKeepalive(socket_t sockfd) {
+    int one = 1;
+    if (setsockopt(sockfd, SOL_SOCKET, SO_KEEPALIVE,
+                   reinterpret_cast<const char*>(&one), sizeof(one)) != 0) {
+        LOG_WARNING("World socket: SO_KEEPALIVE failed: ", wowee::net::errorString(wowee::net::lastError()));
+        return;
+    }
+#ifdef _WIN32
+    tcp_keepalive ka{};
+    ka.onoff = 1;
+    ka.keepalivetime = 15000;      // 15s idle
+    ka.keepaliveinterval = 3000;   // 3s retry
+    DWORD bytesReturned = 0;
+    if (WSAIoctl(sockfd, SIO_KEEPALIVE_VALS, &ka, sizeof(ka),
+                 nullptr, 0, &bytesReturned, nullptr, nullptr) != 0) {
+        LOG_WARNING("World socket: SIO_KEEPALIVE_VALS failed: ", wowee::net::errorString(wowee::net::lastError()));
+    }
+#elif defined(TCP_KEEPIDLE)
+    int idle = 15;
+    int interval = 3;
+    int count = 4;
+    setsockopt(sockfd, IPPROTO_TCP, TCP_KEEPIDLE,
+               reinterpret_cast<const char*>(&idle), sizeof(idle));
+#ifdef TCP_KEEPINTVL
+    setsockopt(sockfd, IPPROTO_TCP, TCP_KEEPINTVL,
+               reinterpret_cast<const char*>(&interval), sizeof(interval));
+#endif
+#ifdef TCP_KEEPCNT
+    setsockopt(sockfd, IPPROTO_TCP, TCP_KEEPCNT,
+               reinterpret_cast<const char*>(&count), sizeof(count));
+#endif
+#elif defined(TCP_KEEPALIVE)
+    int idle = 15;
+    setsockopt(sockfd, IPPROTO_TCP, TCP_KEEPALIVE,
+               reinterpret_cast<const char*>(&idle), sizeof(idle));
+#endif
+}
 
 inline int parsedPacketsBudgetPerUpdate() {
     static int budget = []() {
@@ -146,6 +222,8 @@ WorldSocket::~WorldSocket() {
 
 bool WorldSocket::connect(const std::string& host, uint16_t port) {
     LOG_INFO("Connecting to world server: ", host, ":", port);
+    connectedHost_ = host;
+    connectedPort_ = port;
 
     stopAsyncPump();
 
@@ -227,6 +305,7 @@ bool WorldSocket::connect(const std::string& host, uint16_t port) {
     int one = 1;
     setsockopt(sockfd, IPPROTO_TCP, TCP_NODELAY,
                reinterpret_cast<const char*>(&one), sizeof(one));
+    applyTcpKeepalive(sockfd);
 
     connected = true;
     LOG_INFO("Connected to world server: ", host, ":", port);
@@ -306,6 +385,101 @@ void WorldSocket::dumpRecentPacketHistoryLocked(const char* reason, size_t buffe
                   " logical=", opcodeNameForTrace(entry.opcode),
                   " payload=", entry.payloadLen);
     }
+}
+
+std::string WorldSocket::describeLastTraffic() const {
+    std::lock_guard<std::mutex> lock(ioMutex_);
+    std::string out = "world=";
+    out += connectedHost_.empty() ? "?" : connectedHost_;
+    out += ":";
+    out += std::to_string(connectedPort_);
+    if (recentPacketHistory_.empty()) {
+        out += " no_packet_history";
+        return out;
+    }
+    const auto now = std::chrono::steady_clock::now();
+    int64_t lastTxMs = -1;
+    int64_t lastRxMs = -1;
+    uint16_t lastTxOp = 0;
+    uint16_t lastRxOp = 0;
+    bool sentRootAck = false;
+    bool sentUnrootAck = false;
+    bool sentCinematicComplete = false;
+    bool sentCinematicNext = false;
+    bool sentPing = false;
+    bool sentWarden = false;
+    const uint16_t rootAck = wowee::game::wireOpcode(wowee::game::LogicalOpcode::CMSG_FORCE_MOVE_ROOT_ACK);
+    const uint16_t unrootAck = wowee::game::wireOpcode(wowee::game::LogicalOpcode::CMSG_FORCE_MOVE_UNROOT_ACK);
+    const uint16_t cineDone = wowee::game::wireOpcode(wowee::game::LogicalOpcode::CMSG_COMPLETE_CINEMATIC);
+    const uint16_t cineNext = wowee::game::wireOpcode(wowee::game::LogicalOpcode::CMSG_NEXT_CINEMATIC_CAMERA);
+    const uint16_t ping = wowee::game::wireOpcode(wowee::game::LogicalOpcode::CMSG_PING);
+    const uint16_t wardenTx = wowee::game::wireOpcode(wowee::game::LogicalOpcode::CMSG_WARDEN_DATA);
+    const uint16_t rootRx = wowee::game::wireOpcode(wowee::game::LogicalOpcode::SMSG_FORCE_MOVE_ROOT);
+    const uint16_t cineRx = wowee::game::wireOpcode(wowee::game::LogicalOpcode::SMSG_TRIGGER_CINEMATIC);
+    bool sawRootRx = false;
+    bool sawCineRx = false;
+    for (const auto& entry : recentPacketHistory_) {
+        const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - entry.when).count();
+        if (entry.outbound) {
+            lastTxMs = ms;
+            lastTxOp = entry.opcode;
+            if (rootAck != 0xFFFF && entry.opcode == rootAck) sentRootAck = true;
+            if (unrootAck != 0xFFFF && entry.opcode == unrootAck) sentUnrootAck = true;
+            if (cineDone != 0xFFFF && entry.opcode == cineDone) sentCinematicComplete = true;
+            if (cineNext != 0xFFFF && entry.opcode == cineNext) sentCinematicNext = true;
+            if (ping != 0xFFFF && entry.opcode == ping) sentPing = true;
+            if (wardenTx != 0xFFFF && entry.opcode == wardenTx) sentWarden = true;
+        } else {
+            lastRxMs = ms;
+            lastRxOp = entry.opcode;
+            if (rootRx != 0xFFFF && entry.opcode == rootRx) sawRootRx = true;
+            if (cineRx != 0xFFFF && entry.opcode == cineRx) sawCineRx = true;
+        }
+    }
+    auto appendOp = [&](const char* label, int64_t ms, uint16_t op) {
+        out += " ";
+        out += label;
+        out += "=";
+        if (ms < 0) {
+            out += "none";
+            return;
+        }
+        out += opcodeNameForTrace(op);
+        out += "@";
+        out += std::to_string(ms);
+        out += "ms";
+    };
+    appendOp("lastTX", lastTxMs, lastTxOp);
+    appendOp("lastRX", lastRxMs, lastRxOp);
+    out += " ping=";
+    out += sentPing ? "yes" : "no";
+    out += " wardenTX=";
+    out += sentWarden ? "yes" : "no";
+    out += " ROOT_RX=";
+    out += sawRootRx ? "yes" : "no";
+    out += " ROOT_ACK=";
+    out += sentRootAck ? "yes" : "no";
+    out += " UNROOT_ACK=";
+    out += sentUnrootAck ? "yes" : "no";
+    out += " CINE_RX=";
+    out += sawCineRx ? "yes" : "no";
+    out += " CINE_NEXT=";
+    out += sentCinematicNext ? "yes" : "no";
+    out += " CINE_COMPLETE=";
+    out += sentCinematicComplete ? "yes" : "no";
+    return out;
+}
+
+int64_t WorldSocket::lastOutboundAgeMs() const {
+    std::lock_guard<std::mutex> lock(ioMutex_);
+    const auto now = std::chrono::steady_clock::now();
+    int64_t lastTxMs = -1;
+    for (const auto& entry : recentPacketHistory_) {
+        if (entry.outbound) {
+            lastTxMs = std::chrono::duration_cast<std::chrono::milliseconds>(now - entry.when).count();
+        }
+    }
+    return lastTxMs;
 }
 
 void WorldSocket::send(const Packet& packet) {
@@ -798,8 +972,36 @@ void WorldSocket::tryParsePackets() {
     // Queue parsed packets for main-thread dispatch.
     if (!parsedPackets->empty()) {
         std::lock_guard<std::mutex> callbackLock(callbackMutex_);
+        std::deque<Packet> wardenNow;
+        std::deque<Packet> otherNow;
         for (auto& packet : *parsedPackets) {
-            pendingPacketCallbacks_.push_back(std::move(packet));
+            if (isUrgentSmsg(packet.getOpcode())) {
+                wardenNow.push_back(std::move(packet));
+            } else {
+                otherNow.push_back(std::move(packet));
+            }
+        }
+        // Warden stays ahead of world packets, but MUST remain FIFO among
+        // themselves. insert(begin) of a new batch in front of already-queued
+        // Warden (or GameHandler push_front) reverses HASH-era cheat-checks.
+        if (!wardenNow.empty()) {
+            std::deque<Packet> oldWarden;
+            std::deque<Packet> rest;
+            while (!pendingPacketCallbacks_.empty()) {
+                Packet packet = std::move(pendingPacketCallbacks_.front());
+                pendingPacketCallbacks_.pop_front();
+                if (isUrgentSmsg(packet.getOpcode())) {
+                    oldWarden.push_back(std::move(packet));
+                } else {
+                    rest.push_back(std::move(packet));
+                }
+            }
+            for (auto& packet : oldWarden) pendingPacketCallbacks_.push_back(std::move(packet));
+            for (auto& packet : wardenNow) pendingPacketCallbacks_.push_back(std::move(packet));
+            for (auto& packet : rest) pendingPacketCallbacks_.push_back(std::move(packet));
+            for (auto& packet : otherNow) pendingPacketCallbacks_.push_back(std::move(packet));
+        } else {
+            for (auto& packet : otherNow) pendingPacketCallbacks_.push_back(std::move(packet));
         }
         if (pendingPacketCallbacks_.size() > kMaxQueuedPacketCallbacks) {
             LOG_ERROR("World socket callback queue overflow (", pendingPacketCallbacks_.size(),
@@ -820,27 +1022,90 @@ void WorldSocket::tryParsePackets() {
 }
 
 void WorldSocket::dispatchQueuedPackets() {
+    std::deque<Packet> wardenPackets;
     std::deque<Packet> localPackets;
     {
         std::lock_guard<std::mutex> lock(callbackMutex_);
         if (!packetCallback || pendingPacketCallbacks_.empty()) {
             return;
         }
-        const int maxCallbacksThisTick = packetCallbacksBudgetPerUpdate();
-        for (int i = 0; i < maxCallbacksThisTick && !pendingPacketCallbacks_.empty(); ++i) {
-            localPackets.push_back(std::move(pendingPacketCallbacks_.front()));
+        std::deque<Packet> rest;
+        while (!pendingPacketCallbacks_.empty()) {
+            Packet packet = std::move(pendingPacketCallbacks_.front());
             pendingPacketCallbacks_.pop_front();
+            if (isUrgentSmsg(packet.getOpcode())) {
+                wardenPackets.push_back(std::move(packet));
+            } else {
+                rest.push_back(std::move(packet));
+            }
         }
+        const int maxCallbacksThisTick = packetCallbacksBudgetPerUpdate();
+        for (int i = 0; i < maxCallbacksThisTick && !rest.empty(); ++i) {
+            localPackets.push_back(std::move(rest.front()));
+            rest.pop_front();
+        }
+        pendingPacketCallbacks_ = std::move(rest);
         if (!pendingPacketCallbacks_.empty()) {
             LOG_DEBUG("World socket callback budget reached (", localPackets.size(),
                       " callbacks); deferring ", pendingPacketCallbacks_.size(),
                       " queued packet callbacks");
         }
+        if (!wardenPackets.empty() && !pendingPacketCallbacks_.empty()) {
+            LOG_WARNING("Warden: prioritized ", wardenPackets.size(),
+                        " SMSG_WARDEN_DATA packet(s); ", pendingPacketCallbacks_.size(),
+                        " other packets still queued");
+        }
     }
 
+    while (!wardenPackets.empty()) {
+        packetCallback(wardenPackets.front());
+        wardenPackets.pop_front();
+    }
     while (!localPackets.empty()) {
         packetCallback(localPackets.front());
         localPackets.pop_front();
+    }
+}
+
+void WorldSocket::dispatchWardenCallbacks() {
+    std::deque<Packet> wardenPackets;
+    size_t leftover = 0;
+    {
+        std::lock_guard<std::mutex> lock(callbackMutex_);
+        if (!packetCallback || pendingPacketCallbacks_.empty()) {
+            return;
+        }
+        std::deque<Packet> rest;
+        while (!pendingPacketCallbacks_.empty()) {
+            Packet packet = std::move(pendingPacketCallbacks_.front());
+            pendingPacketCallbacks_.pop_front();
+            if (isUrgentSmsg(packet.getOpcode())) {
+                wardenPackets.push_back(std::move(packet));
+            } else {
+                rest.push_back(std::move(packet));
+            }
+        }
+        leftover = rest.size();
+        pendingPacketCallbacks_ = std::move(rest);
+    }
+    if (wardenPackets.empty()) {
+        return;
+    }
+    if (leftover > 0 || wardenPackets.size() > 1) {
+        std::string sizes;
+        int stayAlive = 0;
+        for (const auto& packet : wardenPackets) {
+            if (!sizes.empty()) sizes += ",";
+            sizes += std::to_string(packet.getSize());
+            if (!isWardenSmsg(packet.getOpcode())) ++stayAlive;
+        }
+        LOG_WARNING("Warden: watchdog/pump dispatched ", wardenPackets.size(),
+                    " urgent packet(s) stayAlive=", stayAlive, " sizes=[", sizes,
+                    "] leftoverWorld=", leftover);
+    }
+    while (!wardenPackets.empty()) {
+        packetCallback(wardenPackets.front());
+        wardenPackets.pop_front();
     }
 }
 
