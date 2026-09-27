@@ -2355,6 +2355,7 @@ public:
     void closeTrainer();
     const std::string& getSpellName(uint32_t spellId) const;
     const std::string& getSpellRank(uint32_t spellId) const;
+    uint32_t getSpellAttributes(uint32_t spellId) const;
     /// Returns the tooltip/description text from Spell.dbc (empty if unknown or has no text).
     const std::string& getSpellDescription(uint32_t spellId) const;
     /// Substitute WoW description tokens in `raw` using live spell data: $s/$o/$m/$M base
@@ -2816,6 +2817,11 @@ public:
     struct SpellNameEntry {
         std::string name; std::string rank; std::string description;
         uint32_t schoolMask = 0; uint8_t dispelType = 0; uint32_t attrEx = 0;
+        // 1.12 Spell.dbc column 6 (SPELL_ATTR_*). Bit 0x80 is hidden from the
+        // spellbook. Kept separate from attrEx, which interrupt checks read.
+        uint32_t attributes = 0;
+        // SpellIcon.dbc id. 1 is Interface\Icons\Temp, the unset portrait.
+        uint32_t iconId = 0;
         // Spell.dbc Targets bitmask (SpellCastTargetFlags) — 0x10 = TARGET_FLAG_ITEM
         uint32_t targetFlags = 0;
         // Spell.dbc RangeIndex resolved against SpellRange.dbc. A max range of 0

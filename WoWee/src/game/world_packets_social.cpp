@@ -286,6 +286,27 @@ const char* getChatTypeString(ChatType type) {
     }
 }
 
+const char* chatLanguageName(ChatLanguage lang) {
+    switch (lang) {
+        case ChatLanguage::UNIVERSAL: return "Universal";
+        case ChatLanguage::ORCISH: return "Orcish";
+        case ChatLanguage::DARNASSIAN: return "Darnassian";
+        case ChatLanguage::TAURAHE: return "Taurahe";
+        case ChatLanguage::DWARVISH: return "Dwarvish";
+        case ChatLanguage::COMMON: return "Common";
+        case ChatLanguage::DEMONIC: return "Demonic";
+        case ChatLanguage::TITAN: return "Titan";
+        case ChatLanguage::THALASSIAN: return "Thalassian";
+        case ChatLanguage::DRACONIC: return "Draconic";
+        case ChatLanguage::KALIMAG: return "Kalimag";
+        case ChatLanguage::GNOMISH: return "Gnomish";
+        case ChatLanguage::TROLL: return "Troll";
+        case ChatLanguage::GUTTERSPEAK: return "Gutterspeak";
+        case ChatLanguage::DRAENEI: return "Draenei";
+        default: return "";
+    }
+}
+
 // ============================================================
 // Text Emotes
 // ============================================================

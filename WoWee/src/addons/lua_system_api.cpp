@@ -3,14 +3,22 @@
 #include <algorithm>
 #include <cstring>
 #include <set>
+#include <string>
+#include <unordered_map>
 #include "addons/lua_api_helpers.hpp"
 #include "audio/audio_coordinator.hpp"
 #include "audio/ui_sound_manager.hpp"
 #include "core/app_clock.hpp"
+#include "core/application.hpp"
 #include "core/window.hpp"
+#include "ui/ui_manager.hpp"
+#include "rendering/renderer.hpp"
+#include "rendering/minimap.hpp"
+#include "ui/settings_panel.hpp"
 
 #include <SDL2/SDL.h>
 #include "game/expansion_profile.hpp"
+#include "pipeline/asset_manager.hpp"
 
 namespace wowee::addons {
 
@@ -85,10 +93,21 @@ static int lua_GetPlayerFacing(lua_State* L) {
     return 1;
 }
 
+// Session cvars. SetCVar used to drop the value, so a checkbox the player
+// turned on read back as off the next time the options page opened.
+static std::unordered_map<std::string, std::string>& sessionCVars() {
+    static std::unordered_map<std::string, std::string> values;
+    return values;
+}
+
 // GetCVar(name) → value string (stub for most, real for a few)
 static int lua_GetCVar(lua_State* L) {
     const char* name = luaL_checkstring(L, 1);
     std::string n(name);
+    if (auto it = sessionCVars().find(n); it != sessionCVars().end()) {
+        lua_pushstring(L, it->second.c_str());
+        return 1;
+    }
     // Return sensible defaults for commonly queried CVars
     if (n == "uiScale") lua_pushstring(L, "1");
     else if (n == "useUIScale") lua_pushstring(L, "1");
@@ -110,9 +129,11 @@ static int lua_GetCVar(lua_State* L) {
     return 1;
 }
 
-// SetCVar(name, value) — no-op stub
+// SetCVar(name, value) — remembered for this session.
 static int lua_SetCVar(lua_State* L) {
-    (void)L;
+    const char* name = luaL_checkstring(L, 1);
+    const char* value = luaL_optstring(L, 2, "");
+    sessionCVars()[name] = value ? value : "";
     return 0;
 }
 
@@ -274,12 +295,54 @@ static int mapIdToContinent(uint32_t mapId) {
 static int s_mapContinent = 0;
 static int s_mapZone = 0;
 
+// WorldMapArea directory names, and AreaTable's parent so a subzone still
+// finds the map file (Dolanaar belongs on the Teldrassil map).
+static std::unordered_map<uint32_t, std::string> s_areaMapFile;
+static std::unordered_map<uint32_t, uint32_t> s_areaParent;
+static bool s_mapFilesLoaded = false;
+
+static void loadMapFiles(game::GameHandler* gh) {
+    if (s_mapFilesLoaded) return;
+    auto* am = gh ? gh->services().assetManager : nullptr;
+    if (!am || !am->isInitialized()) return;
+    s_mapFilesLoaded = true;
+    if (auto dbc = am->loadDBC("WorldMapArea.dbc");
+        dbc && dbc->isLoaded() && dbc->getFieldCount() > 3) {
+        for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
+            const uint32_t area = dbc->getUInt32(i, 2);
+            std::string file = dbc->getString(i, 3);
+            if (area == 0 || file.empty()) continue;
+            s_areaMapFile.emplace(area, std::move(file));
+        }
+    }
+    if (auto dbc = am->loadDBC("AreaTable.dbc");
+        dbc && dbc->isLoaded() && dbc->getFieldCount() > 2) {
+        for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
+            const uint32_t id = dbc->getUInt32(i, 0);
+            const uint32_t parent = dbc->getUInt32(i, 2);
+            if (id != 0) s_areaParent.emplace(id, parent);
+        }
+    }
+}
+
+static std::string mapFileForArea(uint32_t area) {
+    for (int hop = 0; hop < 8 && area != 0; ++hop) {
+        auto it = s_areaMapFile.find(area);
+        if (it != s_areaMapFile.end()) return it->second;
+        auto parent = s_areaParent.find(area);
+        if (parent == s_areaParent.end() || parent->second == area) break;
+        area = parent->second;
+    }
+    return {};
+}
+
 // SetMapToCurrentZone() — sets map view to the player's current zone
 static int lua_SetMapToCurrentZone(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (gh) {
         s_mapContinent = mapIdToContinent(gh->getCurrentMapId());
         s_mapZone = static_cast<int>(gh->getWorldStateZoneId());
+        gh->fireAddonEvent("WORLD_MAP_UPDATE", {});
     }
     return 0;
 }
@@ -562,14 +625,12 @@ static int lua_GetChatWindowInfo(lua_State* L) {
 
     lua_pushstring(L, "");      // name
     lua_pushnumber(L, 14.0);    // fontSize
-    // Black and transparent, the default layout's colour. FCF_SetWindowColor
-    // and FCF_SetWindowAlpha apply these to the background and every border
-    // texture, and ChatFrameBackground is plain white, so white at full alpha
-    // drew an opaque white slab where the chat window sits.
+    // Black at the default 0.25. ChatFrameBackground is plain white, so the
+    // colour here is what tints it; white at full alpha was an opaque slab.
     lua_pushnumber(L, 0.0);     // r
     lua_pushnumber(L, 0.0);     // g
     lua_pushnumber(L, 0.0);     // b
-    lua_pushnumber(L, 0.0);     // alpha
+    lua_pushnumber(L, 0.25);    // alpha, the default chat pane
     // Numbers and nil, not booleans. docked is a dock position, not a flag —
     // FCF_LoadChatSettings hands it straight to FCF_DockFrame as the index to
     // insert at, and that compares it against a count. A boolean there is a
@@ -588,9 +649,23 @@ static int lua_GetChatWindowInfo(lua_State* L) {
 /// the caller takes the branch it would take on a client where that feature is
 /// switched off.
 static int lua_GetMapInfo(lua_State* L) {
-    // mapFileName, textureHeight, textureWidth. WorldMapFrame builds a texture
-    // path out of the first and divides by the other two.
-    lua_pushstring(L, "");
+    // mapFileName, textureHeight, textureWidth. WorldMapFrame builds
+    // Interface\WorldMap\<name>\<name>1..12 from the first. An empty string is
+    // still truthy in Lua, so the frame never fell back and the window stayed
+    // blank.
+    auto* gh = getGameHandler(L);
+    loadMapFiles(gh);
+    std::string file;
+    if (s_mapZone != 0) file = mapFileForArea(static_cast<uint32_t>(s_mapZone));
+    if (file.empty() && gh) file = mapFileForArea(gh->getWorldStateZoneId());
+    if (file.empty()) {
+        int cont = s_mapContinent;
+        if (cont == 0 && gh) cont = mapIdToContinent(gh->getCurrentMapId());
+        if (cont == 1) file = "Kalimdor";
+        else if (cont == 2) file = "Azeroth";
+        else file = "World";
+    }
+    lua_pushstring(L, file.c_str());
     lua_pushnumber(L, 0.0);
     lua_pushnumber(L, 0.0);
     return 3;
@@ -611,9 +686,18 @@ static int lua_ReturnOne(lua_State* L) {
 
 static int lua_GetDefaultLanguage(lua_State* L) {
     auto* gh = getGameHandler(L);
-    static const std::set<uint8_t> kHordeRaces = {2, 5, 6, 8, 10};
-    const bool horde = gh && kHordeRaces.count(gh->getPlayerRace()) > 0;
-    lua_pushstring(L, horde ? "Orcish" : "Common");
+    const char* lang = "Common";
+    switch (gh ? gh->getPlayerRace() : 1) {
+        case 2: lang = "Orcish"; break;
+        case 3: lang = "Dwarvish"; break;
+        case 4: lang = "Darnassian"; break;
+        case 5: lang = "Gutterspeak"; break;
+        case 6: lang = "Taurahe"; break;
+        case 7: lang = "Gnomish"; break;
+        case 8: lang = "Troll"; break;
+        default: break;
+    }
+    lua_pushstring(L, lang);
     return 1;
 }
 
@@ -1173,6 +1257,44 @@ void registerSystemLuaAPI(lua_State* L) {
         lua_pushcfunction(L, func);
         lua_setglobal(L, name);
     }
+
+    lua_pushcfunction(L, [](lua_State* L) -> int {
+        int zoom = static_cast<int>(luaL_optnumber(L, 1, 2));
+        auto* renderer = core::Application::getInstance().getRenderer();
+        if (auto* minimap = renderer ? renderer->getMinimap() : nullptr)
+            minimap->setZoomLevel(zoom);
+        return 0;
+    });
+    lua_setglobal(L, "__WoweeMinimapSetZoom");
+
+    lua_pushcfunction(L, [](lua_State* L) -> int {
+        auto* renderer = core::Application::getInstance().getRenderer();
+        auto* minimap = renderer ? renderer->getMinimap() : nullptr;
+        lua_pushinteger(L, minimap ? minimap->getZoomLevel() : 2);
+        return 1;
+    });
+    lua_setglobal(L, "__WoweeMinimapGetZoom");
+
+    lua_pushcfunction(L, [](lua_State* L) -> int {
+        const float radians = static_cast<float>(luaL_optnumber(L, 1, 0.61));
+        auto* ui = core::Application::getInstance().getUIManager();
+        if (ui) ui->getGameScreen().setPaperDollFacing(radians);
+        return 0;
+    });
+    lua_setglobal(L, "__WoweePaperDollSetFacing");
+
+    lua_pushcfunction(L, [](lua_State*) -> int {
+        auto* ui = core::Application::getInstance().getUIManager();
+        if (ui) ui->getGameScreen().toggleWorldMap();
+        return 0;
+    });
+    lua_setglobal(L, "WoweeToggleWorldMap");
+
+    lua_pushcfunction(L, [](lua_State*) -> int {
+        wowee::ui::requestClientSettings();
+        return 0;
+    });
+    lua_setglobal(L, "WoweeOpenSettings");
 }
 
 } // namespace wowee::addons

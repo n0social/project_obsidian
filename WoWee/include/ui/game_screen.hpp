@@ -45,6 +45,14 @@ public:
      */
     void render(game::GameHandler& gameHandler);
 
+    /// Equipped model for CharacterModelFrame. Width and height are the texture
+    /// size, used to letterbox it into the frame.
+    VkDescriptorSet paperDollTexture(game::GameHandler& gameHandler, int& width, int& height);
+    void setPaperDollFacing(float radians);
+    /// The 1.12 world-map micro button. The FrameXML map is a full-screen
+    /// panel, and opening one hides the rest of the interface.
+    void toggleWorldMap();
+
     /**
      * Check if chat input is active
      */

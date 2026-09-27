@@ -1344,6 +1344,125 @@ void WorldLoader::loadOnlineWorldTerrain(uint32_t mapId, float x, float y, float
         addonManager_->fireEvent("PLAYER_ENTERING_WORLD");
         // The login stance arrived before FrameXML existed to hear about it.
         addonManager_->fireEvent("UPDATE_BONUS_ACTIONBAR");
+            // A tablet has no Enter key sitting under the thumb. Tapping the chat
+            // window opens the 1.12 edit box, which is what takes the keyboard.
+            addonManager_->runScript(
+            "if ChatFrame1 then ChatFrame1:EnableMouse(true)\n"
+            "  ChatFrame1:SetScript('OnMouseUp', function()\n"
+            "    if ChatFrameEditBox then ChatFrameEditBox:Show() end\n"
+            "  end)\n"
+            "  if FCF_UpdateButtonSide then FCF_UpdateButtonSide(ChatFrame1) end\n"
+            "end\n"
+            // Opening a bag shows the frame. Its item buttons are filled from
+            // BAG_UPDATE, which does not arrive for a bag that was closed, so
+            // the open itself has to read the bag.
+            "if ContainerFrame_OnShow and ContainerFrame_Update then\n"
+            "  local orig = ContainerFrame_OnShow\n"
+            "  function ContainerFrame_OnShow()\n"
+            "    orig()\n"
+            "    ContainerFrame_Update(this)\n"
+            "  end\n"
+            "end\n"
+            // The paper doll is the character tab. The other tabs start hidden;
+            // if one of them is up it covers the model in the center. The face
+            // belongs on CharacterFramePortrait, which OnShow fills.
+            "if CharacterFrame_ShowSubFrame then\n"
+            "  CharacterFrame_ShowSubFrame('PaperDollFrame')\n"
+            "end\n"
+            "if SetPortraitTexture and CharacterFramePortrait then\n"
+            "  SetPortraitTexture(CharacterFramePortrait, 'player')\n"
+            "  if __WoweeLogWarning and CharacterFramePortrait.GetTexture then\n"
+            "    __WoweeLogWarning('portrait ' .. tostring(CharacterFramePortrait:GetTexture()))\n"
+            "  end\n"
+            "end\n"
+            "if CharacterNameText and UnitName then\n"
+            "  local n = (UnitPVPName and UnitPVPName('player')) or UnitName('player')\n"
+            "  if n and n ~= '' then CharacterNameText:SetText(n) end\n"
+            "end\n"
+            "if PaperDollFrame_SetLevel then pcall(PaperDollFrame_SetLevel) end\n"
+            "if PetTab_Update then pcall(PetTab_Update) end\n"
+            "if PanelTemplates_TabResize then\n"
+            "  for i = 1, 5 do\n"
+            "    local tab = _G['CharacterFrameTab'..i]\n"
+            "    if tab and tab:IsShown() then PanelTemplates_TabResize(0, tab, 80) end\n"
+            "  end\n"
+            "  for i = 1, 4 do\n"
+            "    local tab = _G['FriendsFrameTab'..i]\n"
+            "    if tab and tab:IsShown() then PanelTemplates_TabResize(0, tab, 80) end\n"
+            "  end\n"
+            "end\n"
+            "if CharacterFrame and CharacterFrame:IsShown() and CharacterFrame_OnShow then\n"
+            "  CharacterFrame_OnShow()\n"
+            "end\n"
+            "if CharacterLevelText then\n"
+            "  CharacterLevelText:SetWidth(200)\n"
+            "  CharacterLevelText:SetJustifyH('CENTER')\n"
+            "end\n"
+            // The right-hand bars are checkboxes on the interface page. Okay
+            // hands their state to SetActionBarToggles, which the 1.12 client
+            // implements in C. Reading the checkboxes here is that call, and
+            // the bag offset moves with the bar so a bag still opens above it.
+            "function SetActionBarToggles()\n"
+            "  local function on(index)\n"
+            "    local b = _G['UIOptionsFrameCheckButton'..index]\n"
+            "    if b and b.GetChecked and b:GetChecked() then return 1 end\n"
+            "  end\n"
+            "  SHOW_MULTI_ACTIONBAR_1 = on(33)\n"
+            "  SHOW_MULTI_ACTIONBAR_2 = on(34)\n"
+            "  SHOW_MULTI_ACTIONBAR_3 = on(35)\n"
+            "  SHOW_MULTI_ACTIONBAR_4 = on(36)\n"
+            "  ALWAYS_SHOW_MULTIBARS = on(40)\n"
+            "  if MultiActionBar_Update then MultiActionBar_Update() end\n"
+            "  if UIParent_ManageFramePositions then pcall(UIParent_ManageFramePositions) end\n"
+            "end\n"
+            "function GetActionBarToggles()\n"
+            "  return SHOW_MULTI_ACTIONBAR_1, SHOW_MULTI_ACTIONBAR_2, SHOW_MULTI_ACTIONBAR_3, SHOW_MULTI_ACTIONBAR_4, ALWAYS_SHOW_MULTIBARS\n"
+            "end\n"
+            // Key bindings and macros have no frame in this interface set.
+            // The menu buttons were calling into that gap and raising.
+            "if GameMenuButtonKeybindings then\n"
+            "  GameMenuButtonKeybindings:SetScript('OnClick', function()\n"
+            "    if UIErrorsFrame and UIErrorsFrame.AddMessage then\n"
+            "      UIErrorsFrame:AddMessage('Key bindings need a keyboard and are not available here.', 1, 0.82, 0, 1)\n"
+            "    end\n"
+            "  end)\n"
+            "end\n"
+            "if GameMenuButtonMacros then\n"
+            "  GameMenuButtonMacros:SetScript('OnClick', function()\n"
+            "    if UIErrorsFrame and UIErrorsFrame.AddMessage then\n"
+            "      UIErrorsFrame:AddMessage('The macro window is not in this client.', 1, 0.82, 0, 1)\n"
+            "    end\n"
+            "  end)\n"
+            "end\n"
+            // WorldMapFrame is registered as a full-screen panel, and showing
+            // that hides the rest of the interface. Keep the 1.12 map, in a
+            // window, and leave the bars up.
+            "function ToggleWorldMap()\n"
+            "  if not WorldMapFrame then return end\n"
+            "  if WorldMapFrame:IsVisible() then\n"
+            "    if HideUIPanel then HideUIPanel(WorldMapFrame) else WorldMapFrame:Hide() end\n"
+            "    return\n"
+            "  end\n"
+            "  if UIPanelWindows and UIPanelWindows.WorldMapFrame then\n"
+            "    UIPanelWindows.WorldMapFrame.area = 'center'\n"
+            "  end\n"
+            "  if ShowUIPanel then ShowUIPanel(WorldMapFrame) else WorldMapFrame:Show() end\n"
+            "  if BlackoutWorld then BlackoutWorld:Hide() end\n"
+            "  if UIParent and not UIParent:IsShown() then UIParent:Show() end\n"
+            "  WorldMapFrame:SetFrameStrata('DIALOG')\n"
+            "  WorldMapFrame:ClearAllPoints()\n"
+            "  WorldMapFrame:SetWidth(720)\n"
+            "  WorldMapFrame:SetHeight(480)\n"
+            "  WorldMapFrame:SetPoint('CENTER', UIParent, 'CENTER', 0, 40)\n"
+            "  if WorldMapFrame_Update then WorldMapFrame_Update() end\n"
+            "end\n"
+            // Eight buttons of 21 sit inside a 246-tall frame and the last one
+            // lands on the border, so the bottom edge reads as two bars.
+            "if GameMenuFrame then GameMenuFrame:SetHeight(280) end\n");
+        addonManager_->fireEvent("QUEST_LOG_UPDATE");
+        addonManager_->fireEvent("SPELLS_CHANGED");
+        addonManager_->fireEvent("UNIT_INVENTORY_CHANGED", {"player"});
+        addonManager_->fireEvent("BAG_UPDATE");
     } else if (addonManager_ && app_.addonsLoaded_) {
         // Subsequent world entries (e.g. teleport, instance entry)
         addonManager_->fireEvent("PLAYER_ENTERING_WORLD");

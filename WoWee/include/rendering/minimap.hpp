@@ -56,6 +56,28 @@ public:
 
     void setOpacity(float opacity) { opacity_ = opacity; }
 
+    /// Pixels, origin top-left. The terrain disc is drawn here instead of the
+    /// fixed top-right corner. Cleared, the corner placement returns.
+    void setDisplayRect(float x, float y, float w, float h) {
+        displayRectSet_ = w > 1.0f && h > 1.0f;
+        displayX_ = x;
+        displayY_ = y;
+        displayW_ = w;
+        displayH_ = h;
+    }
+    void clearDisplayRect() { displayRectSet_ = false; }
+    bool hasDisplayRect() const { return displayRectSet_; }
+    void getDisplayRect(float& x, float& y, float& w, float& h) const {
+        x = displayX_;
+        y = displayY_;
+        w = displayW_;
+        h = displayH_;
+    }
+
+    /// Vanilla zoom is 0 (far) through 4 (close). Step 2 matches the default radius.
+    void setZoomLevel(int zoom);
+    int getZoomLevel() const { return zoomLevel_; }
+
     float getArrowRotation() const { return arrowRotation_; }
     VkDescriptorSet getArrowDS() const { return arrowDS_; }
 
@@ -109,6 +131,9 @@ private:
 
     int mapSize = 200;
     float viewRadius = 400.0f;
+    int zoomLevel_ = 2;
+    bool displayRectSet_ = false;
+    float displayX_ = 0.0f, displayY_ = 0.0f, displayW_ = 0.0f, displayH_ = 0.0f;
     bool enabled = true;
     bool rotateWithCamera = false;
     bool squareShape = false;

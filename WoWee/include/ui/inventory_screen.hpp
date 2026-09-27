@@ -82,6 +82,13 @@ public:
     /// Mark the character preview as needing equipment update
     void markPreviewDirty() { previewDirty_ = true; }
 
+    /// Composite the equipped character and return its texture. Null until the
+    /// first composite has finished. Only call while CharacterModelFrame is up.
+    VkDescriptorSet paperDollTexture(game::GameHandler& gameHandler, int& width, int& height);
+
+    /// Model:SetRotation on CharacterModelFrame, in radians.
+    void setPaperDollFacing(float radians);
+
     /// Update the preview animation (call each frame)
     void updatePreview(float deltaTime);
 
@@ -124,6 +131,8 @@ private:
     std::unique_ptr<rendering::CharacterPreview> charPreview_;
     bool previewInitialized_ = false;
     bool previewDirty_ = false;
+    bool paperDollFacingSet_ = false;
+    float paperDollFacing_ = 0.61f;
 
     // Stored player appearance for preview
     game::Race playerRace_ = game::Race::HUMAN;

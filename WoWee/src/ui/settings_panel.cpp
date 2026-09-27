@@ -46,6 +46,18 @@
 
 namespace wowee { namespace ui {
 
+namespace {
+bool g_clientSettingsRequested = false;
+}
+
+void requestClientSettings() { g_clientSettingsRequested = true; }
+
+bool consumeClientSettingsRequest() {
+    const bool requested = g_clientSettingsRequested;
+    g_clientSettingsRequested = false;
+    return requested;
+}
+
 void SettingsPanel::renderSettingsInterfaceTab(std::function<void()> saveCallback) {
 ImGui::Spacing();
 ImGui::BeginChild("InterfaceSettings", ImVec2(0, -1), true);

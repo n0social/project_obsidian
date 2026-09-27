@@ -36,6 +36,13 @@ public:
     /// tests want.
     void render(WidgetTree& tree, float screenW, float screenH);
 
+    /// Called while CharacterModelFrame is drawn, with its pixel rect. The
+    /// equipped model is painted here so it sits under the rotate buttons and
+    /// the equipment slots, which sort later.
+    void setModelFrameDraw(void (*fn)(ImDrawList* dl, float x0, float y0, float x1, float y1)) {
+        modelFrameDraw_ = fn;
+    }
+
     /// Number of distinct textures resident. Cheap diagnostic; the cache never
     /// evicts, because Interface\ art is small, bounded and reused constantly.
     size_t textureCount() const { return textures_.size(); }
@@ -49,13 +56,15 @@ private:
     VkDescriptorSet resident(const std::string& path) const;
 
     void drawBackdrop(ImDrawList* dl, const Widget& w,
-                      float x0, float y0, float x1, float y1);
+                      float x0, float y0, float x1, float y1, float scale);
     void drawStatusBar(ImDrawList* dl, const Widget& w,
                        float x0, float y0, float x1, float y1);
     void drawSlider(ImDrawList* dl, const Widget& w,
                     float x0, float y0, float x1, float y1);
     void drawCooldown(ImDrawList* dl, const Widget& w,
                       float x0, float y0, float x1, float y1);
+
+    void (*modelFrameDraw_)(ImDrawList*, float, float, float, float) = nullptr;
 
     pipeline::AssetManager* assets_ = nullptr;
     rendering::VkContext* vkCtx_ = nullptr;

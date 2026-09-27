@@ -792,7 +792,9 @@ bool CharacterPreview::loadCharacter(game::Race race, game::Gender gender,
     }
 
     modelLoaded_ = true;
-    loadRacialBackdrop(race);
+    if (backdropEnabled_) {
+        loadRacialBackdrop(race);
+    }
     LOG_INFO("CharacterPreview: loaded ", m2Path,
              " skin=", static_cast<int>(skin), " face=", static_cast<int>(face),
              " hair=", static_cast<int>(hairStyle), " hairColor=", static_cast<int>(hairColor),
@@ -1408,6 +1410,16 @@ void CharacterPreview::compositePass(VkCommandBuffer cmd, uint32_t frameIndex) {
 
 void CharacterPreview::rotate(float yawDelta) {
     modelYaw_ += yawDelta;
+    if (instanceId_ > 0 && charRenderer_) {
+        charRenderer_->setInstanceRotation(instanceId_, glm::vec3(0.0f, 0.0f, modelYaw_));
+    }
+}
+
+void CharacterPreview::setFacingRadians(float radians) {
+    if (!std::isfinite(radians)) return;
+    // The bounds camera sits on +Y looking at the origin, and yaw 90 faces it.
+    // FrameXML's 0.61 rad starting value is the three-quarter paper-doll turn.
+    modelYaw_ = 90.0f + glm::degrees(radians);
     if (instanceId_ > 0 && charRenderer_) {
         charRenderer_->setInstanceRotation(instanceId_, glm::vec3(0.0f, 0.0f, modelYaw_));
     }

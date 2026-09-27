@@ -201,5 +201,10 @@ private:
     void updateGraphicsPresetFromCurrentSettings();
 };
 
+/// The 1.12 Video and Sound buttons ask for this. The vanilla interface
+/// options stay their own frame; this opens the client's settings window.
+void requestClientSettings();
+bool consumeClientSettingsRequest();
+
 } // namespace ui
 } // namespace wowee

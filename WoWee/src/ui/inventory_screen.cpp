@@ -361,12 +361,42 @@ void InventoryScreen::initPreview() {
         if (renderer) renderer->registerPreview(charPreview_.get());
     }
 
+    // The racial city scene belongs on the character-create screen. This
+    // preview is the paper doll, so the model stands on the dark ground.
+    charPreview_->setBackdropEnabled(false);
     charPreview_->loadCharacter(playerRace_, playerGender_,
                                  playerSkin_, playerFace_,
                                  playerHairStyle_, playerHairColor_,
                                  playerFacialHair_);
+    if (paperDollFacingSet_) charPreview_->setFacingRadians(paperDollFacing_);
     previewInitialized_ = true;
     previewDirty_ = true; // apply equipment on first load
+}
+
+void InventoryScreen::setPaperDollFacing(float radians) {
+    paperDollFacing_ = radians;
+    paperDollFacingSet_ = true;
+    if (charPreview_ && previewInitialized_) charPreview_->setFacingRadians(radians);
+}
+
+VkDescriptorSet InventoryScreen::paperDollTexture(game::GameHandler& gameHandler,
+                                                   int& width, int& height) {
+    width = 0;
+    height = 0;
+    if (!previewInitialized_ && assetManager_) initPreview();
+    if (!charPreview_ || !previewInitialized_) return VK_NULL_HANDLE;
+
+    if (previewDirty_) {
+        updatePreviewEquipment(gameHandler.getInventory(),
+                               gameHandler.isHelmVisible(),
+                               gameHandler.isCloakVisible());
+    }
+    charPreview_->update(ImGui::GetIO().DeltaTime);
+    charPreview_->render();
+    charPreview_->requestComposite();
+    width = charPreview_->getWidth();
+    height = charPreview_->getHeight();
+    return charPreview_->getTextureId();
 }
 
 void InventoryScreen::updatePreview(float deltaTime) {

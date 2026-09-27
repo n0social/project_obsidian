@@ -2,6 +2,9 @@
 // Extracted from lua_engine.cpp as part of §5.1 (Tame LuaEngine).
 #include "addons/lua_api_helpers.hpp"
 #include "game/packed_time.hpp"
+#include <algorithm>
+#include <string>
+#include <vector>
 
 namespace wowee::addons {
 
@@ -10,7 +13,7 @@ static int lua_GetNumQuestLogEntries(lua_State* L) {
     if (!gh) { lua_pushnumber(L, 0); lua_pushnumber(L, 0); return 2; }
     const auto& ql = gh->getQuestLog();
     lua_pushnumber(L, ql.size());  // numEntries
-    lua_pushnumber(L, 0);          // numQuests (headers not tracked)
+    lua_pushnumber(L, ql.size());  // numQuests (this log has no zone headers)
     return 2;
 }
 
@@ -26,11 +29,17 @@ static int lua_GetQuestLogTitle(lua_State* L) {
     if (index > static_cast<int>(ql.size())) { return luaReturnNil(L); }
     const auto& q = ql[index - 1];  // 1-based
     lua_pushstring(L, q.title.c_str());  // title
-    lua_pushnumber(L, 0);                // level (not tracked)
-    lua_pushnumber(L, 0);                // suggestedGroup
+    lua_pushnumber(L, q.level);          // level
+    lua_pushnil(L);                      // questTag (Elite, Dungeon, ...). 1.12
+                                         // compares this as a string. A number
+                                         // here prints "(0)" beside every title.
     lua_pushboolean(L, 0);               // isHeader
     lua_pushboolean(L, 0);               // isCollapsed
-    lua_pushboolean(L, q.complete);      // isComplete
+    // 1.12 does `isComplete < 0` for a failed quest. A boolean cannot be
+    // compared with a number, and that error aborts the whole list update
+    // before any title is shown.
+    if (q.complete) lua_pushnumber(L, 1);
+    else lua_pushnil(L);
     lua_pushnumber(L, 0);                // frequency
     lua_pushnumber(L, q.questId);        // questID
     return 8;
@@ -39,13 +48,17 @@ static int lua_GetQuestLogTitle(lua_State* L) {
 // GetQuestLogQuestText(index) → description, objectives
 static int lua_GetQuestLogQuestText(lua_State* L) {
     auto* gh = getGameHandler(L);
-    int index = static_cast<int>(luaL_checknumber(L, 1));
+    // 1.12 calls this with no index and means the selected quest.
+    int index = static_cast<int>(luaL_optnumber(L, 1, 0));
+    if (index < 1 && gh) index = gh->getSelectedQuestLogIndex();
     if (!gh || index < 1) { return luaReturnNil(L); }
     const auto& ql = gh->getQuestLog();
     if (index > static_cast<int>(ql.size())) { return luaReturnNil(L); }
     const auto& q = ql[index - 1];
-    lua_pushstring(L, "");                    // description (not stored)
-    lua_pushstring(L, q.objectives.c_str());  // objectives
+    // The query response keeps one block of text. It is what the detail
+    // pane and the objective line both have to show.
+    lua_pushstring(L, q.objectives.c_str());
+    lua_pushstring(L, q.objectives.c_str());
     return 2;
 }
 
@@ -246,10 +259,74 @@ static int lua_CollapseQuestHeader(lua_State* L) { (void)L; return 0; }
 // GetQuestLogSpecialItemInfo(questLogIndex) — returns nil (no special items)
 static int lua_GetQuestLogSpecialItemInfo(lua_State* L) { (void)L; lua_pushnil(L); return 1; }
 
+struct SkillRow {
+    std::string name;
+    bool header = false;
+    int rank = 0;
+    int maxRank = 0;
+    int temp = 0;
+    int modifier = 0;
+};
+
+static bool skillHiddenFromBook(const std::string& name, uint32_t category) {
+    if (category == 12) return true;
+    if (name.empty()) return true;
+    if (name.find("(DND)") != std::string::npos) return true;
+    if (name.find("(DNC)") != std::string::npos) return true;
+    if (name.rfind("Pet -", 0) == 0) return true;
+    return false;
+}
+
+static const char* skillHeaderTitle(uint32_t category) {
+    switch (category) {
+        case 6: return "Weapon Skills";
+        case 7: return "Class";
+        case 8: return "Armor Proficiencies";
+        case 9: return "Secondary Skills";
+        case 10: return "Languages";
+        case 11: return "Professions";
+        default: return nullptr;
+    }
+}
+
+static std::vector<SkillRow> visibleSkillRows(game::GameHandler* gh) {
+    struct Item {
+        uint32_t category;
+        std::string name;
+        int rank, maxRank, temp, modifier;
+    };
+    std::vector<Item> items;
+    for (const auto& [id, skill] : gh->getPlayerSkills()) {
+        (void)id;
+        const std::string& name = gh->getSkillName(skill.skillId);
+        const uint32_t category = gh->getSkillCategory(skill.skillId);
+        if (skillHiddenFromBook(name, category)) continue;
+        items.push_back({category, name, skill.effectiveValue(),
+                         static_cast<int>(skill.maxValue),
+                         static_cast<int>(skill.bonusTemp),
+                         static_cast<int>(skill.bonusPerm)});
+    }
+    std::sort(items.begin(), items.end(), [](const Item& a, const Item& b) {
+        if (a.category != b.category) return a.category < b.category;
+        return a.name < b.name;
+    });
+    std::vector<SkillRow> rows;
+    uint32_t lastCat = 0xFFFFFFFFu;
+    for (const Item& item : items) {
+        if (item.category != lastCat) {
+            if (const char* title = skillHeaderTitle(item.category))
+                rows.push_back(SkillRow{title, true, 0, 0, 0, 0});
+            lastCat = item.category;
+        }
+        rows.push_back(SkillRow{item.name, false, item.rank, item.maxRank, item.temp, item.modifier});
+    }
+    return rows;
+}
+
 static int lua_GetNumSkillLines(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (!gh) { return luaReturnZero(L); }
-    lua_pushnumber(L, gh->getPlayerSkills().size());
+    lua_pushnumber(L, static_cast<int>(visibleSkillRows(gh).size()));
     return 1;
 }
 
@@ -269,8 +346,8 @@ static int lua_GetSkillLineInfo(lua_State* L) {
     // truthful answer and it costs no more than a blank line in the list.
     // Short-circuit rather than a ternary: binding a reference across both arms
     // would copy the whole skill map on every call.
-    if (!gh || index < 1 ||
-        index > static_cast<int>(gh->getPlayerSkills().size())) {
+    const auto rows = gh ? visibleSkillRows(gh) : std::vector<SkillRow>{};
+    if (!gh || index < 1 || index > static_cast<int>(rows.size())) {
         lua_pushstring(L, "");                          // 1: skillName
         lua_pushboolean(L, 0);                          // 2: isHeader
         lua_pushboolean(L, 1);                          // 3: isExpanded
@@ -279,21 +356,14 @@ static int lua_GetSkillLineInfo(lua_State* L) {
         for (int i = 9; i <= 12; ++i) lua_pushnumber(L, 0); // costs, minLevel, type
         return 12;
     }
-    // Skills are in a map — iterate to the Nth entry
-    const auto& skills = gh->getPlayerSkills();
-    auto it = skills.begin();
-    std::advance(it, index - 1);
-    const auto& skill = it->second;
-    std::string name = gh->getSkillName(skill.skillId);
-    if (name.empty()) name = "Skill " + std::to_string(skill.skillId);
-
-    lua_pushstring(L, name.c_str());                    // 1: skillName
-    lua_pushboolean(L, 0);                              // 2: isHeader (false — flat list)
+    const SkillRow& skill = rows[static_cast<size_t>(index - 1)];
+    lua_pushstring(L, skill.name.c_str());              // 1: skillName
+    lua_pushboolean(L, skill.header ? 1 : 0);           // 2: isHeader
     lua_pushboolean(L, 1);                              // 3: isExpanded
-    lua_pushnumber(L, skill.effectiveValue());           // 4: skillRank
-    lua_pushnumber(L, skill.bonusTemp);                  // 5: numTempPoints
-    lua_pushnumber(L, skill.bonusPerm);                  // 6: skillModifier
-    lua_pushnumber(L, skill.maxValue);                   // 7: skillMaxRank
+    lua_pushnumber(L, skill.rank);                      // 4: skillRank
+    lua_pushnumber(L, skill.temp);                      // 5: numTempPoints
+    lua_pushnumber(L, skill.modifier);                  // 6: skillModifier
+    lua_pushnumber(L, skill.maxRank);                   // 7: skillMaxRank
     lua_pushboolean(L, 0);                              // 8: isAbandonable
     lua_pushnumber(L, 0);                               // 9: stepCost
     lua_pushnumber(L, 0);                               // 10: rankCost
@@ -302,8 +372,93 @@ static int lua_GetSkillLineInfo(lua_State* L) {
     return 12;
 }
 
-// --- Friends/Ignore API ---
+// --- Reputation ---
 
+struct RepRow {
+    std::string name;
+    int32_t standing = 0;
+    bool atWar = false;
+    bool inactive = false;
+};
+
+static void reputationBracket(int32_t standing, int& id, int32_t& barMin, int32_t& barMax) {
+    struct Band { int id; int32_t min; int32_t max; };
+    static const Band bands[] = {
+        {1, -42000, -6000},
+        {2, -6000, -3000},
+        {3, -3000, 0},
+        {4, 0, 3000},
+        {5, 3000, 9000},
+        {6, 9000, 21000},
+        {7, 21000, 42000},
+        {8, 42000, 42999},
+    };
+    for (const Band& band : bands) {
+        if (standing < band.max || band.id == 8) {
+            id = band.id;
+            barMin = band.min;
+            barMax = band.max;
+            return;
+        }
+    }
+    id = 4;
+    barMin = 0;
+    barMax = 3000;
+}
+
+static std::vector<RepRow> visibleFactions(game::GameHandler* gh) {
+    std::vector<RepRow> rows;
+    const auto& init = gh->getInitialFactions();
+    const auto& live = gh->getFactionStandings();
+    rows.reserve(init.size());
+    for (uint32_t i = 0; i < init.size(); ++i) {
+        if (!gh->isFactionVisible(i)) continue;
+        const uint32_t factionId = gh->getFactionIdByRepListId(i);
+        if (factionId == 0) continue;
+        const std::string& name = gh->getFactionNamePublic(factionId);
+        if (name.empty()) continue;
+        int32_t standing = init[i].standing;
+        if (auto it = live.find(factionId); it != live.end()) standing = it->second;
+        rows.push_back(RepRow{name, standing, gh->isFactionAtWar(i), gh->isFactionInactive(i)});
+    }
+    std::sort(rows.begin(), rows.end(), [](const RepRow& a, const RepRow& b) {
+        return a.name < b.name;
+    });
+    return rows;
+}
+
+static int lua_GetNumFactions(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    if (!gh) { return luaReturnZero(L); }
+    lua_pushnumber(L, static_cast<int>(visibleFactions(gh).size()));
+    return 1;
+}
+
+// GetFactionInfo(index) → name, description, standingId, barMin, barMax, barValue,
+// atWarWith, canToggleAtWar, isHeader, isCollapsed, isWatched
+static int lua_GetFactionInfo(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    const int index = static_cast<int>(luaL_optnumber(L, 1, 0));
+    if (!gh || index < 1) { return luaReturnNil(L); }
+    const auto rows = visibleFactions(gh);
+    if (index > static_cast<int>(rows.size())) { return luaReturnNil(L); }
+    const RepRow& row = rows[static_cast<size_t>(index - 1)];
+    int standingId = 4;
+    int32_t barMin = 0, barMax = 3000;
+    reputationBracket(row.standing, standingId, barMin, barMax);
+    lua_pushstring(L, row.name.c_str());
+    lua_pushstring(L, "");
+    lua_pushnumber(L, standingId);
+    lua_pushnumber(L, barMin);
+    lua_pushnumber(L, barMax);
+    lua_pushnumber(L, row.standing);
+    lua_pushboolean(L, row.atWar ? 1 : 0);
+    lua_pushboolean(L, 1);
+    lua_pushboolean(L, 0);
+    lua_pushboolean(L, 0);
+    lua_pushboolean(L, 0);
+    return 11;
+}
 
 static int lua_GetNumTalentTabs(lua_State* L) {
     auto* gh = getGameHandler(L);
@@ -420,7 +575,9 @@ static int lua_GetTalentInfo(lua_State* L) {
     if (name.empty()) name = "Talent " + std::to_string(talent->talentId);
 
     lua_pushstring(L, name.c_str());          // 1: name
-    lua_pushnil(L);                            // 2: iconTexture
+    const std::string icon = gh->getSpellIconPath(talent->rankSpells[0]);
+    if (icon.empty()) lua_pushnil(L);
+    else lua_pushstring(L, icon.c_str());      // 2: iconTexture
     lua_pushnumber(L, talent->row + 1);        // 3: tier (1-indexed)
     lua_pushnumber(L, talent->column + 1);     // 4: column (1-indexed)
     lua_pushnumber(L, rank);                   // 5: rank
@@ -457,6 +614,8 @@ void registerQuestLuaAPI(lua_State* L) {
                 {"GetQuestLogSpecialItemInfo", lua_GetQuestLogSpecialItemInfo},
                 {"GetNumSkillLines",        lua_GetNumSkillLines},
                 {"GetSkillLineInfo",        lua_GetSkillLineInfo},
+                {"GetNumFactions",          lua_GetNumFactions},
+                {"GetFactionInfo",          lua_GetFactionInfo},
                 {"GetNumTalentTabs",        lua_GetNumTalentTabs},
                 {"GetTalentTabInfo",        lua_GetTalentTabInfo},
                 {"GetNumTalents",           lua_GetNumTalents},

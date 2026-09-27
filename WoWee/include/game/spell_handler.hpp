@@ -239,6 +239,8 @@ public:
     float getSpellDuration(uint32_t spellId) const;
     const std::string& getSpellName(uint32_t spellId) const;
     const std::string& getSpellRank(uint32_t spellId) const;
+    /// 1.12 Spell.dbc Attributes (column 6). 0 when the row was not loaded.
+    uint32_t getSpellAttributes(uint32_t spellId) const;
     const std::string& getSpellDescription(uint32_t spellId) const;
     std::string getEnchantName(uint32_t enchantId) const;
     uint8_t getSpellDispelType(uint32_t spellId) const;

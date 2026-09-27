@@ -255,6 +255,19 @@ void GameScreen::applyStartupGraphicsAndAudio() {
     }
 }
 
+VkDescriptorSet GameScreen::paperDollTexture(game::GameHandler& gameHandler,
+                                             int& width, int& height) {
+    return inventoryScreen.paperDollTexture(gameHandler, width, height);
+}
+
+void GameScreen::setPaperDollFacing(float radians) {
+    inventoryScreen.setPaperDollFacing(radians);
+}
+
+void GameScreen::toggleWorldMap() {
+    showWorldMap_ = !showWorldMap_;
+}
+
 void GameScreen::render(game::GameHandler& gameHandler) {
     // Apply before any Begin() calls so a scale change cannot alter style
     // metrics halfway through an ImGui frame.
@@ -305,6 +318,37 @@ void GameScreen::render(game::GameHandler& gameHandler) {
         if (renderer) {
             if (auto* minimap = renderer->getMinimap()) {
                 minimap->setOpacity(settingsPanel_.uiOpacity_);
+                if (!originalInterfaceActive()) {
+                    minimap->clearDisplayRect();
+                } else {
+                    const Widget* map = nullptr;
+                    float scale = 1.0f;
+                    if (auto* addons = core::Application::getInstance().getAddonManager()) {
+                        if (auto* lua = addons->getLuaEngine()) {
+                            auto& tree = lua->widgets();
+                            scale = tree.uiScale();
+                            for (uint32_t id = 1; id < tree.size(); ++id) {
+                                const Widget* w = tree.get(id);
+                                if (w && w->name == "Minimap") { map = w; break; }
+                            }
+                        }
+                    }
+                    if (map && map->visible && map->rectW >= 8.0f && map->rectH >= 8.0f &&
+                        services_.window) {
+                        const float screenH = static_cast<float>(services_.window->getHeight());
+                        minimap->setEnabled(true);
+                        minimap->setDisplayRect(
+                            map->left * scale,
+                            screenH - (map->bottom + map->rectH) * scale,
+                            map->rectW * scale,
+                            map->rectH * scale);
+                    } else if (map && !map->visible) {
+                        minimap->clearDisplayRect();
+                        minimap->setEnabled(false);
+                    } else {
+                        minimap->clearDisplayRect();
+                    }
+                }
             }
         }
     }
@@ -485,8 +529,8 @@ void GameScreen::render(game::GameHandler& gameHandler) {
         renderTotemFrame(gameHandler);
     }
 
-    // Target frame (only when we have a target)
-    if (gameHandler.hasTarget()) {
+    // The 1.12 TargetFrame covers the same portrait, name and bars.
+    if (gameHandler.hasTarget() && !originalUi) {
         renderTargetFrame(gameHandler);
     }
 
@@ -504,7 +548,8 @@ void GameScreen::render(game::GameHandler& gameHandler) {
         renderEntityList(gameHandler);
     }
 
-    if (showChatWindow) {
+    // The 1.12 ChatFrame is the chat window when the original interface is up.
+    if (showChatWindow && !originalUi) {
         chatPanel_.getSpellIcon = [this](uint32_t id, pipeline::AssetManager* am) {
             return getSpellIcon(id, am);
         };
@@ -555,7 +600,11 @@ void GameScreen::render(game::GameHandler& gameHandler) {
     dialogManager_.renderDialogs(gameHandler, inventoryScreen, chatPanel_);
     socialPanel_.renderGuildRoster(gameHandler, chatPanel_);
     socialPanel_.renderSocialFrame(gameHandler, chatPanel_);
-    combatUI_.renderBuffBar(gameHandler, spellbookScreen, inventoryScreen, settingsPanel_, spellIconFn);
+    // BuffFrame is the buff row while the 1.12 interface is up. This bar sat
+    // just left of the minimap and, with no icon, drew a green box labelled
+    // with the spell id.
+    if (!originalUi)
+        combatUI_.renderBuffBar(gameHandler, spellbookScreen, inventoryScreen, settingsPanel_, spellIconFn);
     windowManager_.renderLootWindow(gameHandler, inventoryScreen, chatPanel_);
     windowManager_.renderGossipWindow(gameHandler, chatPanel_);
     windowManager_.renderQuestDetailsWindow(gameHandler, chatPanel_, inventoryScreen);
@@ -607,6 +656,10 @@ void GameScreen::render(game::GameHandler& gameHandler) {
     windowManager_.renderReclaimCorpseButton(gameHandler);
     dialogManager_.renderLateDialogs(gameHandler);
     chatPanel_.renderBubbles(gameHandler);
+    if (consumeClientSettingsRequest()) {
+        settingsPanel_.showSettingsWindow = true;
+        settingsPanel_.settingsInit = false;
+    }
     windowManager_.renderEscapeMenu(settingsPanel_);
     settingsPanel_.renderSettingsWindow(inventoryScreen, chatPanel_, [this]() { saveSettings(); });
     toastManager_.renderLateToasts(gameHandler);
@@ -614,9 +667,12 @@ void GameScreen::render(game::GameHandler& gameHandler) {
 
     renderWorldMap(gameHandler);
 
-    questLogScreen.render(gameHandler, inventoryScreen);
-
-    spellbookScreen.render(gameHandler, services_.assetManager);
+    // The 1.12 frames are the quest log, spellbook and bags. These windows
+    // open on the same keys and were drawing inside those frames.
+    if (!originalUi) {
+        questLogScreen.render(gameHandler, inventoryScreen);
+        spellbookScreen.render(gameHandler, services_.assetManager);
+    }
 
     // Insert spell link into chat if player shift-clicked a spellbook entry
     {
@@ -684,10 +740,12 @@ void GameScreen::render(game::GameHandler& gameHandler) {
     }
 
     inventoryScreen.setGameHandler(&gameHandler);
-    inventoryScreen.render(gameHandler.getInventory(), gameHandler.getMoneyCopper());
-
-    // Character screen (C key toggle handled inside render())
-    inventoryScreen.renderCharacterScreen(gameHandler);
+    // Bags and the character window are the 1.12 frames while that interface
+    // is up. Opening them here stacked a second copy on the paper doll.
+    if (!originalUi) {
+        inventoryScreen.render(gameHandler.getInventory(), gameHandler.getMoneyCopper());
+        inventoryScreen.renderCharacterScreen(gameHandler);
+    }
 
     // Item-target cursor (sharpening stone / oil awaiting the item it applies to)
     inventoryScreen.renderItemTargetCursor();

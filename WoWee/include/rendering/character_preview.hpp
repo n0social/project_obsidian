@@ -40,6 +40,10 @@ public:
     void update(float deltaTime);
     void render();
     void rotate(float yawDelta);
+    /// Absolute facing in radians, as Model:SetRotation reports it.
+    void setFacingRadians(float radians);
+    /// Character creation uses the racial glue scene. The paper doll does not.
+    void setBackdropEnabled(bool enabled) { backdropEnabled_ = enabled; }
     void zoom(float wheelDelta);
     void resetView();
 
@@ -137,6 +141,7 @@ private:
     bool modelLoaded_ = false;
     bool compositeRequested_ = false;
     bool compositeRendered_ = false;  // True after first successful compositePass
+    bool backdropEnabled_ = true;
     float modelYaw_ = 90.0f;
 
     // Character-creation portrait rig. The full-body distance is recomputed for

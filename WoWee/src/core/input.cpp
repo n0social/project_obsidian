@@ -30,6 +30,10 @@ void Input::update() {
     currentMouseState[0] = false;
     for (int i = 1; i < NUM_MOUSE_BUTTONS; ++i) {
         currentMouseState[i] = (mouseState & SDL_BUTTON(i)) != 0;
+        edgePressed_[i] = pressedEvent_[i] || (currentMouseState[i] && !previousMouseState[i]);
+        edgeReleased_[i] = releasedEvent_[i] || (!currentMouseState[i] && previousMouseState[i]);
+        pressedEvent_[i] = false;
+        releasedEvent_[i] = false;
     }
 
     // Calculate mouse delta
@@ -42,6 +46,14 @@ void Input::update() {
 void Input::handleEvent(const SDL_Event& event) {
     if (event.type == SDL_MOUSEWHEEL) {
         mouseWheelDelta = static_cast<float>(event.wheel.y);
+    } else if (event.type == SDL_MOUSEBUTTONDOWN || event.type == SDL_MOUSEBUTTONUP) {
+        const int button = event.button.button;
+        if (button > 0 && button < NUM_MOUSE_BUTTONS) {
+            if (event.type == SDL_MOUSEBUTTONDOWN) pressedEvent_[button] = true;
+            else releasedEvent_[button] = true;
+        }
+        mousePosition = glm::vec2(static_cast<float>(event.button.x),
+                                   static_cast<float>(event.button.y));
     }
 }
 
@@ -67,12 +79,12 @@ bool Input::isMouseButtonPressed(int button) const {
 
 bool Input::isMouseButtonJustPressed(int button) const {
     if (button < 0 || button >= NUM_MOUSE_BUTTONS) return false;
-    return currentMouseState[button] && !previousMouseState[button];
+    return edgePressed_[button];
 }
 
 bool Input::isMouseButtonJustReleased(int button) const {
     if (button < 0 || button >= NUM_MOUSE_BUTTONS) return false;
-    return !currentMouseState[button] && previousMouseState[button];
+    return edgeReleased_[button];
 }
 
 void Input::setMouseLocked(bool locked) {

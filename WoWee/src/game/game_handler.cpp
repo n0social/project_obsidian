@@ -18,6 +18,7 @@
 #include "game/update_field_table.hpp"
 #include "game/expansion_profile.hpp"
 #include "rendering/renderer.hpp"
+#include <cctype>
 #include "rendering/spell_visual_system.hpp"
 #include "audio/audio_coordinator.hpp"
 #include "audio/activity_sound_manager.hpp"
@@ -2360,7 +2361,20 @@ void GameHandler::loadFactionNameCache() const {
         LOG_WARNING("Faction.dbc: unexpected field count ", dbc->getFieldCount());
         // Don't abort — still try to load names from a shorter layout
     }
-    const uint32_t nameField = (dbc->getFieldCount() > NAME_FIELD) ? NAME_FIELD : 22u;
+    // WotLK keeps the English name at column 23. The 1.12 file has 37
+    // columns and the name at 19; column 23 is empty there, which is why
+    // every reputation row came back without a faction name.
+    uint32_t nameField = (dbc->getFieldCount() > NAME_FIELD) ? NAME_FIELD : 19u;
+    if (dbc->getFieldCount() > 19) {
+        for (uint32_t probe = 0; probe < dbc->getRecordCount() && probe < 40; ++probe) {
+            const std::string classic = dbc->getString(probe, 19);
+            if (classic.size() > 2 &&
+                std::isalpha(static_cast<unsigned char>(classic[0]))) {
+                nameField = 19;
+                break;
+            }
+        }
+    }
 
     uint32_t count = dbc->getRecordCount();
     for (uint32_t i = 0; i < count; ++i) {

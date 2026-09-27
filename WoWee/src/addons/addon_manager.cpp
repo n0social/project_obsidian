@@ -527,6 +527,14 @@ bool AddonManager::runScript(const std::string& code) {
 }
 
 void AddonManager::fireEvent(const std::string& event, const std::vector<std::string>& args) {
+    // 1.12 BAG_UPDATE's first argument is the bag id, and the container frame
+    // ignores the event unless it matches. Call sites that do not know which
+    // bag changed used to send nothing, so an open bag never redrew.
+    if (event == "BAG_UPDATE" && args.empty()) {
+        for (int bag = 0; bag <= 4; ++bag)
+            luaEngine_.fireEvent(event, {std::to_string(bag)});
+        return;
+    }
     luaEngine_.fireEvent(event, args);
 }
 

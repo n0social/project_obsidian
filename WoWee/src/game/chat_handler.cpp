@@ -21,6 +21,36 @@
 namespace wowee {
 namespace game {
 
+namespace {
+
+void fireChatMessageEvent(GameHandler& owner, const MessageChatData& data,
+                          const std::string& senderName, uint64_t guid) {
+    if (!owner.addonEventCallbackRef()) return;
+    std::string eventName = "CHAT_MSG_";
+    eventName += getChatTypeString(data.type);
+    char guidBuf[32];
+    snprintf(guidBuf, sizeof(guidBuf), "0x%016llX", (unsigned long long)guid);
+    int channelIndex = 0;
+    if (data.type == ChatType::CHANNEL && owner.getChatHandler())
+        channelIndex = owner.getChatHandler()->getChannelIndex(data.channelName);
+    owner.addonEventCallbackRef()(eventName, {
+        data.message,
+        senderName,
+        chatLanguageName(data.language),
+        data.channelName,
+        "",
+        "",
+        "0",
+        std::to_string(channelIndex),
+        data.channelName,
+        "0",
+        "0",
+        guidBuf
+    });
+}
+
+} // namespace
+
 ChatHandler::ChatHandler(GameHandler& owner)
     : owner_(owner) {
     initializeChatLog();
@@ -624,27 +654,7 @@ void ChatHandler::handleMessageChat(network::Packet& packet) {
 
     // Fire CHAT_MSG_* addon events
     if (owner_.addonChatCallbackRef()) owner_.addonChatCallbackRef()(data);
-    if (owner_.addonEventCallbackRef()) {
-        std::string eventName = "CHAT_MSG_";
-        eventName += getChatTypeString(data.type);
-        std::string lang = std::to_string(static_cast<int>(data.language));
-        char guidBuf[32];
-        snprintf(guidBuf, sizeof(guidBuf), "0x%016llX", (unsigned long long)data.senderGuid);
-        owner_.addonEventCallbackRef()(eventName, {
-            data.message,
-            data.senderName,
-            lang,
-            data.channelName,
-            senderInfo,
-            "",
-            "0",
-            "0",
-            "",
-            "0",
-            "0",
-            guidBuf
-        });
-    }
+    fireChatMessageEvent(owner_, data, data.senderName, data.senderGuid);
 }
 
 void ChatHandler::sendTextEmote(uint32_t textEmoteId, uint64_t targetGuid) {
@@ -883,20 +893,12 @@ void ChatHandler::addLocalChatMessage(const MessageChatData& msg) {
     logChatMessage(msg, "local");
     if (owner_.addonChatCallbackRef()) owner_.addonChatCallbackRef()(msg);
 
-    if (owner_.addonEventCallbackRef()) {
-        std::string eventName = "CHAT_MSG_";
-        eventName += getChatTypeString(msg.type);
+    {
         const Character* ac = owner_.getActiveCharacter();
         std::string senderName = msg.senderName.empty()
             ? (ac ? ac->name : std::string{}) : msg.senderName;
-        char guidBuf[32];
-        snprintf(guidBuf, sizeof(guidBuf), "0x%016llX",
-                 (unsigned long long)(msg.senderGuid != 0 ? msg.senderGuid : owner_.getPlayerGuid()));
-        owner_.addonEventCallbackRef()(eventName, {
-            msg.message, senderName,
-            std::to_string(static_cast<int>(msg.language)),
-            msg.channelName, senderName, "", "0", "0", "", "0", "0", guidBuf
-        });
+        const uint64_t guid = msg.senderGuid != 0 ? msg.senderGuid : owner_.getPlayerGuid();
+        fireChatMessageEvent(owner_, msg, senderName, guid);
     }
 }
 

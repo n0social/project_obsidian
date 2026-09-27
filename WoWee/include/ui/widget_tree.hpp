@@ -108,6 +108,9 @@ struct Widget {
     /// A slider shares the bar's range and value but is dragged rather than
     /// filled, and draws a thumb at the value instead of a fill to it.
     bool  isSlider = false;
+    /// A check button toggles when it is clicked. The script then reads
+    /// GetChecked, so the check has to flip before OnClick runs.
+    bool  isCheckButton = false;
     /// A cooldown darkens what it covers and wipes clear as the time runs out.
     /// Start is on the same clock GetTime answers with; zero duration means
     /// nothing is running.

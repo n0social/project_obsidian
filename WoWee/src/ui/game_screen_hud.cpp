@@ -1301,6 +1301,16 @@ void GameScreen::renderQuestObjectiveTracker(game::GameHandler& gameHandler) {
 
 void GameScreen::renderNameplates(game::GameHandler& gameHandler) {
     if (gameHandler.getState() != game::WorldState::IN_WORLD) return;
+    // The original interface draws its own nameplates. These bars sit on the
+    // NPC and are what a finger tap lands on instead of the unit.
+    static const bool originalUi = [] {
+        const auto set = [](const char* n) {
+            const char* v = std::getenv(n);
+            return v && *v && std::string(v) != "0";
+        };
+        return set("WOWEE_LOAD_FRAMEXML") && set("WOWEE_FRAMEXML_UI");
+    }();
+    if (originalUi) return;
 
     // Reset mouseover each frame; we'll set it below when the cursor is over a nameplate
     gameHandler.setMouseoverGuid(0);

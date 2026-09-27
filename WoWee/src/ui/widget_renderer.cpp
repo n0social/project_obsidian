@@ -11,13 +11,47 @@
 #include "imgui.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cfloat>
 #include <cstdlib>
 #include <cmath>
+#include <string>
 #include <vector>
 
 namespace wowee {
 namespace ui {
+
+// FrameXML writes colour and link escapes into ordinary font strings.
+// The quest log's "0/20" arrives as "|cffffffff0/20|r", and drawing that
+// literally is what put the codes on the page.
+static std::string plainInterfaceText(const std::string& in) {
+    std::string out;
+    out.reserve(in.size());
+    for (size_t i = 0; i < in.size();) {
+        if (in[i] == '|' && i + 1 < in.size()) {
+            const char c = in[i + 1];
+            if (c == 'c' || c == 'C') {
+                i += 2;
+                size_t hex = 0;
+                while (i < in.size() && hex < 8 &&
+                       std::isxdigit(static_cast<unsigned char>(in[i]))) {
+                    ++i;
+                    ++hex;
+                }
+                continue;
+            }
+            if (c == 'r' || c == 'R' || c == 'h') { i += 2; continue; }
+            if (c == 'n' || c == 'N') { out.push_back(' '); i += 2; continue; }
+            if (c == 'H' || c == 'T') {
+                const size_t bar = in.find('|', i + 2);
+                i = (bar == std::string::npos) ? in.size() : bar;
+                continue;
+            }
+        }
+        out.push_back(in[i++]);
+    }
+    return out;
+}
 
 namespace {
 
@@ -79,13 +113,15 @@ VkDescriptorSet WidgetRenderer::texture(const std::string& path) {
 
 
 void WidgetRenderer::drawBackdrop(ImDrawList* dl, const Widget& w,
-                                  float x0, float y0, float x1, float y1) {
+                                  float x0, float y0, float x1, float y1, float scale) {
     // Background sits inside the insets, which is what keeps it from showing
-    // through the border drawn over it.
-    const float bx0 = x0 + w.insetLeft;
-    const float by0 = y0 + w.insetTop;
-    const float bx1 = x1 - w.insetRight;
-    const float by1 = y1 - w.insetBottom;
+    // through the border drawn over it. Insets and the edge are interface
+    // units; the rect handed in is already in pixels.
+    const float sc = scale > 0.0f ? scale : 1.0f;
+    const float bx0 = x0 + w.insetLeft * sc;
+    const float by0 = y0 + w.insetTop * sc;
+    const float bx1 = x1 - w.insetRight * sc;
+    const float by1 = y1 - w.insetBottom * sc;
     if (bx1 > bx0 && by1 > by0) {
         VkDescriptorSet bg = resident(w.bgFile);
         const uint32_t col = packColor(w.backdropColor, w.alpha);
@@ -94,8 +130,8 @@ void WidgetRenderer::drawBackdrop(ImDrawList* dl, const Widget& w,
             // which is the difference between a stone wall and a smear.
             float u1 = 1.0f, v1 = 1.0f;
             if (w.tileBackground && w.edgeSize > 0.0f) {
-                u1 = (bx1 - bx0) / w.edgeSize;
-                v1 = (by1 - by0) / w.edgeSize;
+                u1 = (bx1 - bx0) / (w.edgeSize * sc);
+                v1 = (by1 - by0) / (w.edgeSize * sc);
             }
             dl->AddImage(reinterpret_cast<ImTextureID>(bg), ImVec2(bx0, by0), ImVec2(bx1, by1),
                          ImVec2(0.0f, 0.0f), ImVec2(u1, v1), col);
@@ -113,7 +149,7 @@ void WidgetRenderer::drawBackdrop(ImDrawList* dl, const Widget& w,
     // The edge file is eight square tiles in a row. Measured against the art
     // rather than assumed: UI-Tooltip-Border is 128x16 and UI-DialogBox-Border
     // 256x32, both exactly eight tiles wide.
-    const float e = w.edgeSize;
+    const float e = w.edgeSize * sc;
     const uint32_t col = packColor(w.borderColor, w.alpha);
     auto piece = [&](int index, float px0, float py0, float px1, float py1) {
         const float u0 = index / 8.0f, u1 = (index + 1) / 8.0f;
@@ -380,6 +416,25 @@ void WidgetRenderer::render(WidgetTree& tree, float screenW, float screenH) {
                      ImVec2(440.0f, 440.0f));
     }
 
+    {
+        static bool questTitleLogged = false;
+        if (!questTitleLogged) {
+            for (size_t id = 1; id < tree.size(); ++id) {
+                const Widget* q = tree.get(static_cast<uint32_t>(id));
+                if (!q || q->name != "QuestLogTitleText") continue;
+                questTitleLogged = true;
+                LOG_WARNING("QuestLogTitleText text='", q->text, "' rect=(",
+                            q->left, ",", q->bottom, " ", q->rectW, "x", q->rectH,
+                            ") shown=", q->shown ? 1 : 0,
+                            " visible=", q->visible ? 1 : 0,
+                            " rgba=", q->color[0], ",", q->color[1], ",",
+                            q->color[2], ",", q->color[3],
+                            " fontH=", q->fontHeight);
+                break;
+            }
+        }
+    }
+
     for (const Widget* w : order) {
         // WoW measures from the bottom-left and upward; the screen measures from
         // the top-left and downward. Flip here, at the one place it matters, so
@@ -390,7 +445,10 @@ void WidgetRenderer::render(WidgetTree& tree, float screenW, float screenH) {
         const float y1 = screenH - w->bottom * s;
 
         if (w->kind == WidgetKind::Frame) {
-            if (w->hasBackdrop) drawBackdrop(dl, *w, x0, y0, x1, y1);
+            if (w->name == "CharacterModelFrame" && modelFrameDraw_) {
+                modelFrameDraw_(dl, x0, y0, x1, y1);
+            }
+            if (w->hasBackdrop) drawBackdrop(dl, *w, x0, y0, x1, y1, s);
             if (w->isStatusBar) drawStatusBar(dl, *w, x0, y0, x1, y1);
             if (w->isSlider) drawSlider(dl, *w, x0, y0, x1, y1);
             if (w->isCooldown) drawCooldown(dl, *w, x0, y0, x1, y1);
@@ -478,17 +536,36 @@ void WidgetRenderer::render(WidgetTree& tree, float screenW, float screenH) {
             const float base = ImGui::GetFontSize();
             const float size = ((w->fontHeight > 0.0f) ? w->fontHeight : base) * s;
             (void)base;
+            const std::string shown = plainInterfaceText(w->text);
+            const char* shownText = shown.c_str();
             const ImVec2 extent =
-                font ? font->CalcTextSizeA(size, FLT_MAX, 0.0f, w->text.c_str())
-                     : ImGui::CalcTextSize(w->text.c_str());
+                font ? font->CalcTextSizeA(size, FLT_MAX, 0.0f, shownText)
+                     : ImGui::CalcTextSize(shownText);
             float tx = x0;
-            if (w->justifyH == "CENTER")     tx = x0 + (w->rectW - extent.x) * 0.5f;
+            // The box is already in pixels here. Measuring against rectH mixed
+            // interface units into that and sat the line above its box.
+            const float span = x1 - x0;
+            const float boxH = y1 - y0;
+            if (w->justifyH == "CENTER")     tx = x0 + (span - extent.x) * 0.5f;
             else if (w->justifyH == "RIGHT") tx = x1 - extent.x;
-            const float ty = y0 + (w->rectH - extent.y) * 0.5f;
+            // A box someone sized on purpose (a tab, a name plate) keeps its
+            // glyphs inside that box. A label with no width of its own is the
+            // size of its text; clamping it to a short estimate cut the tail
+            // off menu buttons ("Video Optio", "Key Bindin").
+            const bool clipToBox = w->width > 0.0f;
+            if (clipToBox && w->justifyH != "RIGHT" && tx < x0) tx = x0;
+            float ty = y0;
+            if (boxH > extent.y)
+                ty = y0 + (boxH - extent.y) * 0.5f;
             // An outline is drawn as the same glyphs in black around the text.
             // ImGui has no outlined draw, and offsetting a few copies is what
             // the effect amounts to at these sizes — it is what keeps a
             // nameplate legible against whatever is behind it.
+            const ImVec4 clip = clipToBox
+                ? ImVec4(x0, y0, x1, y1)
+                : ImVec4(std::min(tx, x0) - 2.0f, std::min(ty, y0) - 2.0f,
+                         std::max(tx + extent.x, x1) + 2.0f,
+                         std::max(ty + extent.y, y1) + 2.0f);
             if (!w->fontOutline.empty()) {
                 const float d = (w->fontOutline == "THICK") ? 2.0f : 1.0f;
                 const uint32_t shadow = IM_COL32(0, 0, 0,
@@ -499,11 +576,11 @@ void WidgetRenderer::render(WidgetTree& tree, float screenW, float screenH) {
                 };
                 for (const ImVec2& o : around) {
                     dl->AddText(font, size, ImVec2(tx + o.x, ty + o.y), shadow,
-                                w->text.c_str());
+                                shownText, nullptr, 0.0f, &clip);
                 }
             }
             dl->AddText(font, size, ImVec2(tx, ty),
-                        packColor(w->color, w->alpha), w->text.c_str());
+                        packColor(w->color, w->alpha), shownText, nullptr, 0.0f, &clip);
         }
     }
 }

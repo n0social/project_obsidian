@@ -733,6 +733,8 @@ bool decodeAddonChatPayload(const MessageChatData& data,
  * Get human-readable string for chat type
  */
 const char* getChatTypeString(ChatType type);
+/// The name ChatFrame compares against GetDefaultLanguage ("Common", "Darnassian").
+const char* chatLanguageName(ChatLanguage lang);
 const char* getItemSubclassName(uint32_t itemClass, uint32_t subClass);
 
 // ============================================================

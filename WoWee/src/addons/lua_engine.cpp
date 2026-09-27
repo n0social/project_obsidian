@@ -297,15 +297,26 @@ int lua_Region_SetSize(lua_State* L) {
     if (auto* w = widgetOf(L, 1)) {
         w->width  = static_cast<float>(luaL_optnumber(L, 2, 0));
         w->height = static_cast<float>(luaL_optnumber(L, 3, 0));
+        // GetWidth and GetHeight answer the laid-out rect. A script that
+        // sizes a bag and then reads the height back, in the same call,
+        // has to see the size it just set.
+        w->rectW = w->width;
+        w->rectH = w->height;
     }
     return 0;
 }
 int lua_Region_SetWidth(lua_State* L) {
-    if (auto* w = widgetOf(L, 1)) w->width = static_cast<float>(luaL_optnumber(L, 2, 0));
+    if (auto* w = widgetOf(L, 1)) {
+        w->width = static_cast<float>(luaL_optnumber(L, 2, 0));
+        w->rectW = w->width;
+    }
     return 0;
 }
 int lua_Region_SetHeight(lua_State* L) {
-    if (auto* w = widgetOf(L, 1)) w->height = static_cast<float>(luaL_optnumber(L, 2, 0));
+    if (auto* w = widgetOf(L, 1)) {
+        w->height = static_cast<float>(luaL_optnumber(L, 2, 0));
+        w->rectH = w->height;
+    }
     return 0;
 }
 /// Width of a string as it would be drawn.
@@ -356,12 +367,40 @@ int lua_Region_GetTextHeight(lua_State* L) {
 
 int lua_Region_GetWidth(lua_State* L) {
     const auto* w = widgetOf(L, 1);
-    lua_pushnumber(L, w ? (w->rectW > 0.0f ? w->rectW : w->width) : 0.0);
+    if (!w) { lua_pushnumber(L, 0); return 1; }
+    // A font string with no width of its own is the width of its text. Tab
+    // bars size themselves from that, and answering the laid-out box (often
+    // zero, or the whole button) pushes the later tabs off the panel.
+    if (w->kind == wowee::ui::WidgetKind::FontString && w->width <= 0.0f) {
+        lua_pushnumber(L, measureTextWidth(w->text, w->fontHeight));
+        return 1;
+    }
+    lua_pushnumber(L, w->rectW > 0.0f ? w->rectW : w->width);
     return 1;
 }
 int lua_Region_GetHeight(lua_State* L) {
     const auto* w = widgetOf(L, 1);
     lua_pushnumber(L, w ? (w->rectH > 0.0f ? w->rectH : w->height) : 0.0);
+    return 1;
+}
+int lua_Region_GetLeft(lua_State* L) {
+    const auto* w = widgetOf(L, 1);
+    lua_pushnumber(L, w ? w->left : 0.0);
+    return 1;
+}
+int lua_Region_GetRight(lua_State* L) {
+    const auto* w = widgetOf(L, 1);
+    lua_pushnumber(L, w ? w->left + w->rectW : 0.0);
+    return 1;
+}
+int lua_Region_GetBottom(lua_State* L) {
+    const auto* w = widgetOf(L, 1);
+    lua_pushnumber(L, w ? w->bottom : 0.0);
+    return 1;
+}
+int lua_Region_GetTop(lua_State* L) {
+    const auto* w = widgetOf(L, 1);
+    lua_pushnumber(L, w ? w->bottom + w->rectH : 0.0);
     return 1;
 }
 int lua_Region_Show(lua_State* L) {
@@ -620,6 +659,10 @@ void installRegionMethods(lua_State* L, bool isTexture, bool isFontString) {
     set("GetTextHeight", lua_Region_GetTextHeight);
     set("GetStringHeight", lua_Region_GetTextHeight);
     set("GetHeight", lua_Region_GetHeight);
+    set("GetLeft", lua_Region_GetLeft);
+    set("GetRight", lua_Region_GetRight);
+    set("GetBottom", lua_Region_GetBottom);
+    set("GetTop", lua_Region_GetTop);
     set("Show", lua_Region_Show);
     set("Hide", lua_Region_Hide);
     set("IsShown", lua_Region_IsShown);
@@ -948,7 +991,12 @@ static int lua_Frame_CreateFontString(lua_State* L) {
     lua_newtable(L);
     if (tree) {
         const uint32_t id = tree->create(wowee::ui::WidgetKind::FontString, parent, name ? name : "");
-        if (auto* w = tree->get(id)) w->layer = wowee::ui::parseDrawLayer(layer);
+        if (auto* w = tree->get(id)) {
+            w->layer = wowee::ui::parseDrawLayer(layer);
+            // Above the textures declared in the same layer. A title written
+            // into the header art is otherwise covered by that art.
+            w->subLevel = 1;
+        }
         lua_pushinteger(L, static_cast<lua_Integer>(id));
         lua_setfield(L, -2, "__wid");
     }
@@ -1159,7 +1207,8 @@ static int lua_CreateFrame(lua_State* L) {
         // which is what EnableMouse is for.
         if (auto* w = tree->get(id)) {
             const std::string ft = frameType ? frameType : "Frame";
-            w->mouseEnabled = (ft == "Button" || ft == "CheckButton");
+            w->mouseEnabled = (ft == "Button" || ft == "CheckButton" || ft == "Minimap");
+            w->isCheckButton = (ft == "CheckButton");
             w->isStatusBar = (ft == "StatusBar");
             // A slider takes the mouse by nature: it exists to be dragged.
             w->isSlider = (ft == "Slider");
@@ -1194,6 +1243,12 @@ static int lua_CreateFrame(lua_State* L) {
         // Also set as a global so other addons can find it by name
         lua_pushvalue(L, -1);
         lua_setglobal(L, name);
+        // Minimap_OnUpdate compares this every frame. Nil would error and
+        // the ping model's OnUpdate would be switched off.
+        if (std::strcmp(name, "Minimap") == 0) {
+            lua_pushinteger(L, 0);
+            lua_setfield(L, -2, "timer");
+        }
     }
 
     // Set initial visibility
@@ -1278,6 +1333,10 @@ static int lua_CreateFrame(lua_State* L) {
         }
         lua_pop(L, 1);
     }
+    // Past OnLoad. Show/Hide run their handlers only after this, so the
+    // construction Hide of a hidden="true" frame is not an OnHide.
+    lua_pushboolean(L, 1);
+    lua_setfield(L, -2, "__loaded");
 
     return 1;
 }
@@ -1546,7 +1605,25 @@ void LuaEngine::registerCoreAPI() {
         "function GetGMTicket() end\n"
         "function CheckReadyCheckTime() end\n"
         "function GuildControlGetRankFlags() return nil end\n"
-        "function GetChatWindowMessages(i) end\n"
+        // The groups a fresh 1.12 client shows: General on window 1, the
+        // combat log on window 2. UPDATE_CHAT_WINDOWS registers whatever this
+        // returns, and nothing registered means the window stays blank.
+        "function GetChatWindowMessages(i)\n"
+        "  if i == 1 then\n"
+        "    return 'SYSTEM','SAY','YELL','WHISPER','PARTY','GUILD','CREATURE','CHANNEL','SKILL','LOOT'\n"
+        "  elseif i == 2 then\n"
+        "    return 'COMBAT_MISC_INFO','COMBAT_SELF_HITS','COMBAT_SELF_MISSES',\n"
+        "      'COMBAT_PET_HITS','COMBAT_PET_MISSES','COMBAT_PARTY_HITS','COMBAT_PARTY_MISSES',\n"
+        "      'COMBAT_HOSTILEPLAYER_HITS','COMBAT_HOSTILEPLAYER_MISSES',\n"
+        "      'COMBAT_CREATURE_VS_SELF_HITS','COMBAT_CREATURE_VS_SELF_MISSES',\n"
+        "      'COMBAT_FRIENDLY_DEATH','COMBAT_HOSTILE_DEATH','COMBAT_XP_GAIN',\n"
+        "      'SPELL_SELF_DAMAGE','SPELL_SELF_BUFF','SPELL_HOSTILEPLAYER_DAMAGE',\n"
+        "      'SPELL_CREATURE_VS_SELF_DAMAGE','SPELL_CREATURE_VS_SELF_BUFF',\n"
+        "      'SPELL_PERIODIC_SELF_DAMAGE','SPELL_PERIODIC_SELF_BUFFS',\n"
+        "      'SPELL_PERIODIC_HOSTILEPLAYER_DAMAGE','SPELL_PERIODIC_CREATURE_DAMAGE',\n"
+        "      'SPELL_AURA_GONE_SELF','SPELL_FAILED_LOCALPLAYER','COMBAT_FACTION_CHANGE'\n"
+        "  end\n"
+        "end\n"
         "function GetChatWindowChannels(i) end\n"
         "function UpdateMapHighlight(x, y) return nil end\n"
         "function CreateWorldMapArrowFrame(f) end\n"
@@ -1593,6 +1670,10 @@ void LuaEngine::registerCoreAPI() {
         {"GetTextHeight",   lua_Region_GetTextHeight},
         {"GetStringHeight", lua_Region_GetTextHeight},
         {"GetHeight",       lua_Region_GetHeight},
+        {"GetLeft",         lua_Region_GetLeft},
+        {"GetRight",        lua_Region_GetRight},
+        {"GetBottom",       lua_Region_GetBottom},
+        {"GetTop",          lua_Region_GetTop},
         {"GetCenter",       lua_Frame_GetCenter},
         {"SetAlpha",        lua_Region_SetAlpha},
         {"GetAlpha",        lua_Region_GetAlpha},
@@ -1640,6 +1721,12 @@ void LuaEngine::registerCoreAPI() {
     auto applyFrameMethods = [&]() {
         lua_getglobal(L_, "__WoweeFrameMT");
         for (const luaL_Reg* r = frameMethods; r->name; r++) {
+            // Show and Hide are wrapped in Lua so OnShow and OnHide run.
+            // Putting the C functions back here drops that wrapper, and a
+            // panel then appears with none of the text or icons its OnShow
+            // was supposed to fill in.
+            if (std::strcmp(r->name, "Show") == 0 || std::strcmp(r->name, "Hide") == 0)
+                continue;
             lua_pushcfunction(L_, r->func);
             lua_setfield(L_, -2, r->name);
         }
@@ -1661,6 +1748,90 @@ void LuaEngine::registerCoreAPI() {
     // mouse, however plainly the call read in the addon.
     bootstrap(
         "local mt = __WoweeFrameMT\n"
+        // Show and Hide change the widget, and that is all they did. FrameXML
+        // fills a panel from OnShow — the spellbook, the quest log, the paper
+        // doll — so a frame that appears without that handler is the right
+        // window with nothing in it. The initial Hide() during load happens
+        // before __loaded, and must not count as the player closing it.
+        "local rawShow, rawHide = mt.Show, mt.Hide\n"
+        "function mt:Show()\n"
+        "    local was = self:IsShown()\n"
+        "    rawShow(self)\n"
+        "    local name = self:GetName()\n"
+        // The portrait and the tab row are filled here, not only on the first
+        // Show. A panel that was already shown never runs OnShow, which left
+        // the ring empty and the tabs at their template width, past the frame.
+        "    if name == 'CharacterFrame' then\n"
+        "        if SetPortraitTexture and CharacterFramePortrait then\n"
+        "            SetPortraitTexture(CharacterFramePortrait, 'player')\n"
+        "        end\n"
+        "        if CharacterNameText and UnitName then\n"
+        "            local n = (UnitPVPName and UnitPVPName('player')) or UnitName('player')\n"
+        "            if n and n ~= '' then CharacterNameText:SetText(n) end\n"
+        "        end\n"
+        "        if PaperDollFrame_SetLevel then pcall(PaperDollFrame_SetLevel) end\n"
+        "        if PetTab_Update then pcall(PetTab_Update) end\n"
+        "        if PanelTemplates_TabResize then\n"
+        "            for i = 1, 5 do\n"
+        "                local tab = _G['CharacterFrameTab'..i]\n"
+        "                if tab and tab:IsShown() then PanelTemplates_TabResize(0, tab, 80) end\n"
+        "            end\n"
+        "        end\n"
+        "    elseif name == 'FriendsFrame' and PanelTemplates_TabResize then\n"
+        "        for i = 1, 4 do\n"
+        "            local tab = _G['FriendsFrameTab'..i]\n"
+        "            if tab and tab:IsShown() then PanelTemplates_TabResize(0, tab, 80) end\n"
+        "        end\n"
+        "    end\n"
+        "    if UpdateMicroButtons then pcall(UpdateMicroButtons) end\n"
+        "    if PanelTemplates_UpdateTabs then\n"
+        "        if name == 'CharacterFrame' and CharacterFrame and CharacterFrame.selectedTab then\n"
+        "            pcall(PanelTemplates_UpdateTabs, CharacterFrame)\n"
+        "        elseif name == 'FriendsFrame' and FriendsFrame and FriendsFrame.selectedTab then\n"
+        "            pcall(PanelTemplates_UpdateTabs, FriendsFrame)\n"
+        "        end\n"
+        "    end\n"
+        "    if was then return end\n"
+        "    if __WoweeLogWarning and (name == 'SpellBookFrame' or name == 'QuestLogFrame' or name == 'CharacterFrame' or name == 'PaperDollFrame') then\n"
+        "        __WoweeLogWarning('Show ' .. tostring(name) .. ' loaded=' .. tostring(self.__loaded))\n"
+        "    end\n"
+        "    if name == 'SpellBookFrame' and type(UpdateSpells) == 'function' then\n"
+        "        local ok, err = pcall(UpdateSpells)\n"
+        "        if not ok and __WoweeLogWarning then __WoweeLogWarning('UpdateSpells: ' .. tostring(err)) end\n"
+        "    elseif name == 'QuestLogFrame' and type(QuestLog_Update) == 'function' then\n"
+        "        local ok, err = pcall(QuestLog_Update)\n"
+        "        if not ok and __WoweeLogWarning then __WoweeLogWarning('QuestLog_Update: ' .. tostring(err)) end\n"
+        "    elseif name == 'PaperDollFrame' and type(PaperDollItemSlotButton_Update) == 'function' then\n"
+        "        local old = this\n"
+        "        local slots = {'CharacterHeadSlot','CharacterNeckSlot','CharacterShoulderSlot','CharacterBackSlot','CharacterChestSlot','CharacterShirtSlot','CharacterTabardSlot','CharacterWristSlot','CharacterHandsSlot','CharacterWaistSlot','CharacterLegsSlot','CharacterFeetSlot','CharacterFinger0Slot','CharacterFinger1Slot','CharacterTrinket0Slot','CharacterTrinket1Slot','CharacterMainHandSlot','CharacterSecondaryHandSlot','CharacterRangedSlot','CharacterAmmoSlot'}\n"
+        "        for _, n in ipairs(slots) do\n"
+        "            local b = _G[n]\n"
+        "            if b then this = b; PaperDollItemSlotButton_Update() end\n"
+        "        end\n"
+        "        this = old\n"
+        "    end\n"
+        "    if not self.__loaded then return end\n"
+        "    local h = self.__scripts and self.__scripts.OnShow\n"
+        "    if type(h) ~= 'function' then return end\n"
+        "    this = self\n"
+        "    local ok, err = pcall(h, self)\n"
+        "    if not ok and __WoweeLogWarning then\n"
+        "        __WoweeLogWarning('OnShow ' .. tostring(self:GetName()) .. ': ' .. tostring(err))\n"
+        "    end\n"
+        "end\n"
+        "function mt:Hide()\n"
+        "    local was = self:IsShown()\n"
+        "    rawHide(self)\n"
+        "    if not was or not self.__loaded then return end\n"
+        "    local h = self.__scripts and self.__scripts.OnHide\n"
+        "    if type(h) ~= 'function' then return end\n"
+        "    this = self\n"
+        "    local ok, err = pcall(h, self)\n"
+        "    if not ok and __WoweeLogWarning then\n"
+        "        __WoweeLogWarning('OnHide ' .. tostring(self:GetName()) .. ': ' .. tostring(err))\n"
+        "    end\n"
+        "    if UpdateMicroButtons then pcall(UpdateMicroButtons) end\n"
+        "end\n"
 
         "function mt:GetFrameStrata() return self.__strata or 'MEDIUM' end\n"
         "function mt:EnableMouseWheel(enable) end\n"
@@ -1676,13 +1847,35 @@ void LuaEngine::registerCoreAPI() {
         "function mt:SetScale(scale) self.__scale = scale end\n"
         "function mt:GetScale() return self.__scale or 1.0 end\n"
         "function mt:GetEffectiveScale() return self.__scale or 1.0 end\n"
+        "function mt:GetCenter()\n"
+        "    return self:GetLeft() + self:GetWidth() * 0.5, self:GetBottom() + self:GetHeight() * 0.5\n"
+        "end\n"
+        "function mt:SetZoom(zoom)\n"
+        "    zoom = math.floor((tonumber(zoom) or 0) + 0.5)\n"
+        "    if zoom < 0 then zoom = 0 elseif zoom > 4 then zoom = 4 end\n"
+        "    self.__zoom = zoom\n"
+        "    if __WoweeMinimapSetZoom then __WoweeMinimapSetZoom(zoom) end\n"
+        "end\n"
+        "function mt:GetZoom()\n"
+        "    if __WoweeMinimapGetZoom then return __WoweeMinimapGetZoom() end\n"
+        "    return self.__zoom or 2\n"
+        "end\n"
+        "function mt:GetZoomLevels() return 5 end\n"
+        // PlayerModel:SetUnit selects who the model shows. The face portrait is
+        // a separate texture (CharacterFramePortrait, top left). Filling this
+        // frame with that face put the portrait in the paper-doll alcove.
+        "function mt:SetUnit(unit)\n"
+        "    self.__unit = unit\n"
+        "end\n"
+        "function mt:SetRotation(radians)\n"
+        "    self.__rotation = tonumber(radians) or 0\n"
+        "    if self:GetName() == 'CharacterModelFrame' and __WoweePaperDollSetFacing then\n"
+        "        __WoweePaperDollSetFacing(self.__rotation)\n"
+        "    end\n"
+        "end\n"
         "function mt:SetToplevel(top) end\n"
         "function mt:Raise() end\n"
         "function mt:Lower() end\n"
-        "function mt:GetLeft() return 0 end\n"
-        "function mt:GetRight() return 0 end\n"
-        "function mt:GetTop() return 0 end\n"
-        "function mt:GetBottom() return 0 end\n"
         "function mt:GetNumPoints() return 0 end\n"
         "function mt:GetPoint(n) return 'CENTER', nil, 'CENTER', 0, 0 end\n"
         "function mt:SetHitRectInsets(...) end\n"
@@ -1779,6 +1972,7 @@ void LuaEngine::registerCoreAPI() {
         "function mt:GetChecked() return self.__checked and 1 or nil end\n"
         "function mt:SetButtonState(state, locked)\n"
         "    self.__pushed = (state == 'PUSHED') or nil\n"
+        "    self.__buttonLocked = (self.__pushed and locked) and true or nil\n"
         "    __WoweeButtonRefresh(self)\n"
         "end\n"
         "function mt:GetButtonState() return self.__pushed and 'PUSHED' or 'NORMAL' end\n"
@@ -1860,6 +2054,55 @@ void LuaEngine::registerCoreAPI() {
         "    if self.__fontString then return self.__fontString:GetText() end\n"
         "    return self.__text\n"
         "end\n"
+        // A scrolling message frame is how chat draws. The method was a no-op,
+        // so every line the chat frame built was thrown away.
+        "local function plainChat(s)\n"
+        "    s = tostring(s or '')\n"
+        "    s = string.gsub(s, '|c%x%x%x%x%x%x%x%x', '')\n"
+        "    s = string.gsub(s, '|r', '')\n"
+        "    s = string.gsub(s, '|H.-|h(.-)|h', '%1')\n"
+        "    s = string.gsub(s, '|T.-|t', '')\n"
+        "    return s\n"
+        "end\n"
+        "function mt:AddMessage(text, r, g, b)\n"
+        "    text = plainChat(text)\n"
+        "    if text == '' then return end\n"
+        "    self.__msgs = self.__msgs or {}\n"
+        "    table.insert(self.__msgs, {text, r or 1, g or 1, b or 1})\n"
+        "    while #self.__msgs > 100 do table.remove(self.__msgs, 1) end\n"
+        "    local lineH = 16\n"
+        "    local h = self:GetHeight()\n"
+        "    if not h or h < lineH then h = 120 end\n"
+        "    local visible = math.floor(h / lineH)\n"
+        "    if visible < 1 then visible = 1 elseif visible > 24 then visible = 24 end\n"
+        "    self.__msgLabels = self.__msgLabels or {}\n"
+        "    local startAt = #self.__msgs - visible + 1\n"
+        "    if startAt < 1 then startAt = 1 end\n"
+        "    local n = 0\n"
+        "    for i = startAt, #self.__msgs do\n"
+        "        n = n + 1\n"
+        "        local label = self.__msgLabels[n]\n"
+        "        if not label then\n"
+        "            label = self:CreateFontString(nil, 'OVERLAY')\n"
+        "            label:SetFontObject('ChatFontNormal')\n"
+        "            label:SetJustifyH('LEFT')\n"
+        "            label:SetHeight(lineH)\n"
+        "            self.__msgLabels[n] = label\n"
+        "        end\n"
+        "        local m = self.__msgs[i]\n"
+        "        label:SetText(m[1])\n"
+        "        label:SetTextColor(m[2], m[3], m[4], 1)\n"
+        "        label:ClearAllPoints()\n"
+        "        label:SetPoint('BOTTOMLEFT', self, 'BOTTOMLEFT', 4, (n - 1) * lineH)\n"
+        "        local w = self:GetWidth()\n"
+        "        label:SetWidth((w and w > 8) and (w - 8) or 400)\n"
+        "        label:Show()\n"
+        "    end\n"
+        "    for i = n + 1, #self.__msgLabels do self.__msgLabels[i]:Hide() end\n"
+        "end\n"
+        // The down arrow flashes while the frame believes it is scrolled up.
+        // These lines are always the latest ones, so there is nothing below them.
+        "function mt:AtBottom() return 1 end\n"
     );
 
     // Catch-all for unimplemented widget methods. Frames are logic-only stubs (not
@@ -2199,17 +2442,25 @@ void LuaEngine::registerCoreAPI() {
         "local __portraitRace = {'Human','Orc','Dwarf','NightElf','Scourge','Tauren','Gnome','Troll'}\n"
         "function SetPortraitTexture(tex, unit)\n"
         "  if type(tex) ~= 'table' or not tex.SetTexture then return end\n"
-        "  if UnitExists and not UnitExists(unit) then return end\n"
-        "  local path = 'Interface\\\\CharacterFrame\\\\TemporaryPortrait-Monster'\n"
-        "  if UnitIsPlayer and UnitIsPlayer(unit) then\n"
-        "    local _, _, raceId = UnitRace(unit)\n"
-        "    local race = __portraitRace[raceId or 0]\n"
-        "    if race then\n"
-        "      local sex = UnitSex and UnitSex(unit) == 3 and 'Female' or 'Male'\n"
-        "      path = 'Interface\\\\CharacterFrame\\\\TemporaryPortrait-' .. sex .. '-' .. race\n"
+        "  local path\n"
+        "  if WoweeUnitPortrait then path = WoweeUnitPortrait(unit) end\n"
+        "  if not path then\n"
+        "    path = 'Interface\\\\CharacterFrame\\\\TemporaryPortrait-Monster'\n"
+        "    if UnitIsPlayer and UnitIsPlayer(unit) then\n"
+        "      local _, _, raceId = UnitRace(unit)\n"
+        "      local race = __portraitRace[raceId or 0]\n"
+        "      if race then\n"
+        "        local sex = UnitSex and UnitSex(unit) == 3 and 'Female' or 'Male'\n"
+        "        path = 'Interface\\\\CharacterFrame\\\\TemporaryPortrait-' .. sex .. '-' .. race\n"
+        "      end\n"
         "    end\n"
         "  end\n"
         "  tex:SetTexture(path)\n"
+        "end\n"
+        // Bags and the keyring pass either the texture or its global name.
+        "function SetPortraitToTexture(tex, path)\n"
+        "  if type(tex) == 'string' then tex = _G[tex] end\n"
+        "  if type(tex) == 'table' and tex.SetTexture and path then tex:SetTexture(path) end\n"
         "end\n"
         "function StopSound() end\n"
         "function UIParent_OnEvent() end\n"
@@ -2803,6 +3054,26 @@ void LuaEngine::registerCoreAPI() {
         "strfind = string.find\n"
         "strsub = string.sub\n"
         "strlen = string.len\n"
+        // 1.12's spellbook does not refresh itself. UpdateSpells is a client
+        // function the XML calls from OnShow, and without it the buttons stay
+        // as they were at load, before any spell had been learned.
+        "function UpdateSpells()\n"
+        "    if type(SpellButton_UpdateButton) ~= 'function' then return end\n"
+        "    local old = this\n"
+        "    for i = 1, 12 do\n"
+        "        local b = _G['SpellButton' .. i]\n"
+        "        if b and b:IsVisible() then\n"
+        "            this = b\n"
+        "            SpellButton_UpdateButton()\n"
+        "            -- The slot border is artwork and paints after the icon's\n"
+        "            -- border layer. Its centre is opaque here, so the icon\n"
+        "            -- has to sit above that frame or the square stays empty.\n"
+        "            local icon = _G['SpellButton' .. i .. 'IconTexture']\n"
+        "            if icon and icon.SetDrawLayer then icon:SetDrawLayer('OVERLAY', 7) end\n"
+        "        end\n"
+        "    end\n"
+        "    this = old\n"
+        "end\n"
         "strrep = string.rep\n"
         "strbyte = string.byte\n"
         "strchar = string.char\n"
@@ -3401,15 +3672,77 @@ void LuaEngine::dispatchMouse(float x, float y, MouseButtons buttons) {
             }
             if (pressedWid_[i] != 0)
                 callFrameScript(pressedWid_[i], "OnMouseDown", b.name);
+            // A check button's own click is the toggle. Options, the
+            // spellbook tabs and the talent frame all read GetChecked from
+            // OnClick, and a tap that never flips the check looks dead.
         } else if (!b.down && buttonDown_[i]) {
             buttonDown_[i] = false;
             if (pressedWid_[i] != 0) {
                 callFrameScript(pressedWid_[i], "OnMouseUp", b.name);
+                if (pressedWid_[i] == hit && i == 0) {
+                    if (auto* hw = widgets_.get(pressedWid_[i]); hw && hw->isCheckButton) {
+                        lua_getglobal(L_, "__WoweeFramesByWid");
+                        if (lua_istable(L_, -1)) {
+                            lua_pushinteger(L_, static_cast<lua_Integer>(pressedWid_[i]));
+                            lua_rawget(L_, -2);
+                            if (lua_istable(L_, -1)) {
+                                lua_getfield(L_, -1, "GetChecked");
+                                bool on = false;
+                                if (lua_isfunction(L_, -1)) {
+                                    lua_pushvalue(L_, -2);
+                                    if (lua_pcall(L_, 1, 1, 0) == 0)
+                                        on = lua_toboolean(L_, -1) != 0;
+                                    lua_pop(L_, 1);
+                                } else {
+                                    lua_pop(L_, 1);
+                                }
+                                lua_getfield(L_, -1, "SetChecked");
+                                if (lua_isfunction(L_, -1)) {
+                                    lua_pushvalue(L_, -2);
+                                    lua_pushboolean(L_, on ? 0 : 1);
+                                    if (lua_pcall(L_, 2, 0, 0) != 0) lua_pop(L_, 1);
+                                } else {
+                                    lua_pop(L_, 1);
+                                }
+                            }
+                            lua_pop(L_, 1);
+                        }
+                        lua_pop(L_, 1);
+                    }
+                }
                 // A click is press and release on the same frame, which is what
                 // lets a player slide off a button to change their mind.
                 if (pressedWid_[i] == hit &&
                     frameAcceptsClick(pressedWid_[i], b.name))
                     callFrameScript(pressedWid_[i], "OnClick", b.name);
+                // A press that was not locked down by an open window goes back
+                // up when the finger does. The locked ones are the micro
+                // buttons, and those release when their window closes.
+                lua_getglobal(L_, "__WoweeFramesByWid");
+                if (lua_istable(L_, -1)) {
+                    lua_pushinteger(L_, static_cast<lua_Integer>(pressedWid_[i]));
+                    lua_rawget(L_, -2);
+                    if (lua_istable(L_, -1)) {
+                        lua_getfield(L_, -1, "__buttonLocked");
+                        const bool locked = lua_toboolean(L_, -1) != 0;
+                        lua_pop(L_, 1);
+                        lua_getfield(L_, -1, "__pushed");
+                        const bool pushed = lua_toboolean(L_, -1) != 0;
+                        lua_pop(L_, 1);
+                        if (pushed && !locked) {
+                            lua_getfield(L_, -1, "SetButtonState");
+                            if (lua_isfunction(L_, -1)) {
+                                lua_pushvalue(L_, -2);
+                                lua_pushstring(L_, "NORMAL");
+                                if (lua_pcall(L_, 2, 0, 0) != 0) lua_pop(L_, 1);
+                            } else {
+                                lua_pop(L_, 1);
+                            }
+                        }
+                    }
+                    lua_pop(L_, 1);
+                }
+                lua_pop(L_, 1);
             }
             pressedWid_[i] = 0;
         }

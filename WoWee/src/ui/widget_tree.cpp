@@ -1,8 +1,12 @@
 #include "ui/widget_tree.hpp"
+#include "ui/interface_fonts.hpp"
+
+#include "imgui.h"
 
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <string>
 
 namespace wowee {
 namespace ui {
@@ -20,6 +24,37 @@ std::string upper(std::string s) {
 
 int strataRank(FrameStrata s) { return static_cast<int>(s); }
 int layerRank(DrawLayer l) { return static_cast<int>(l); }
+
+// Colour and link escapes are not glyphs. Measuring them as letters makes the
+// box wider than the line that is actually drawn.
+std::string plainLabel(const std::string& in) {
+    std::string out;
+    out.reserve(in.size());
+    for (size_t i = 0; i < in.size();) {
+        if (in[i] == '|' && i + 1 < in.size()) {
+            const char c = in[i + 1];
+            if (c == 'c' || c == 'C') {
+                i += 2;
+                size_t hex = 0;
+                while (i < in.size() && hex < 8 &&
+                       std::isxdigit(static_cast<unsigned char>(in[i]))) {
+                    ++i;
+                    ++hex;
+                }
+                continue;
+            }
+            if (c == 'r' || c == 'R' || c == 'h') { i += 2; continue; }
+            if (c == 'n' || c == 'N') { out.push_back(' '); i += 2; continue; }
+            if (c == 'H' || c == 'T') {
+                const size_t bar = in.find('|', i + 2);
+                i = (bar == std::string::npos) ? in.size() : bar;
+                continue;
+            }
+        }
+        out.push_back(in[i++]);
+    }
+    return out;
+}
 
 } // namespace
 
@@ -216,8 +251,34 @@ void WidgetTree::layoutWidget(uint32_t id, float screenW, float screenH) {
     const float pW      = parent ? parent->rectW  : screenW;
     const float pH      = parent ? parent->rectH  : screenH;
 
-    solveAxis(cx, w->width,  pLeft,   pW, w->left,   w->rectW);
-    solveAxis(cy, w->height, pBottom, pH, w->bottom, w->rectH);
+    // A label with no size is still a box the size of its text. Leaving the
+    // box at 0x0 centres the glyphs on the anchor point, so half of every
+    // such line draws outside the control it belongs to.
+    float explicitW = w->width;
+    float explicitH = w->height;
+    if (w->kind == WidgetKind::FontString) {
+        const float line = w->fontHeight > 0.0f ? w->fontHeight : 12.0f;
+        if (explicitH <= 0.0f) explicitH = line;
+        // A label with no width of its own is as wide as its glyphs. Guessing
+        // from the character count undershoots this face, and the draw then
+        // clips the tail — "Video Options" was coming out as "Video Optio".
+        if (explicitW <= 0.0f && !w->text.empty()) {
+            const std::string shown = plainLabel(w->text);
+            const float scale = uiScale_ > 0.0f ? uiScale_ : 1.0f;
+            const float px = line * scale;
+            ImFont* font = interfaceFace(w->fontFace);
+            if (!font) font = interfaceFace("frizqt__");
+            if (!font && ImGui::GetCurrentContext()) font = ImGui::GetFont();
+            if (font && ImGui::GetCurrentContext() && !shown.empty())
+                explicitW = font->CalcTextSizeA(px, FLT_MAX, 0.0f, shown.c_str()).x / scale;
+            else
+                explicitW = static_cast<float>(shown.size()) * line * 0.6f;
+            explicitW += 2.0f;
+        }
+    }
+
+    solveAxis(cx, explicitW, pLeft,   pW, w->left,   w->rectW);
+    solveAxis(cy, explicitH, pBottom, pH, w->bottom, w->rectH);
 
     for (uint32_t child : w->children) layoutWidget(child, screenW, screenH);
 }
@@ -250,8 +311,16 @@ void WidgetTree::collectDrawOrder() {
         // Frames are containers, except when they carry a backdrop or are a
         // status bar — then the frame itself has something to paint, and it
         // paints underneath its own regions because they sit a level above it.
-        if (w.kind == WidgetKind::Frame && !w.hasBackdrop && !w.isStatusBar) continue;
-        if (w.rectW <= 0.0f || w.rectH <= 0.0f) continue;
+        // A plain frame paints nothing, so it is not a draw. CharacterModelFrame
+        // is the exception: the equipped model is drawn into its rect, and it
+        // has to occupy this slot so the slot buttons and rotate buttons, which
+        // sort later, stay on top of it.
+        if (w.kind == WidgetKind::Frame && !w.hasBackdrop && !w.isStatusBar &&
+            w.name != "CharacterModelFrame") continue;
+        // A font string often has no size of its own. The level on the player
+        // portrait is one: it is anchored, and the text is its size. Dropping
+        // those leaves the number off the frame while the sized name stays.
+        if (w.kind != WidgetKind::FontString && (w.rectW <= 0.0f || w.rectH <= 0.0f)) continue;
         if (w.kind == WidgetKind::Texture && w.texturePath.empty() && !w.solidColor) continue;
         if (w.kind == WidgetKind::Frame && w.isStatusBar && w.barTexture.empty() &&
             !w.hasBackdrop) continue;

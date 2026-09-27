@@ -3062,6 +3062,10 @@ const std::string& GameHandler::getSpellRank(uint32_t spellId) const {
     return EMPTY_STRING;
 }
 
+uint32_t GameHandler::getSpellAttributes(uint32_t spellId) const {
+    return spellHandler_ ? spellHandler_->getSpellAttributes(spellId) : 0;
+}
+
 const std::string& GameHandler::getSpellDescription(uint32_t spellId) const {
     if (spellHandler_) return spellHandler_->getSpellDescription(spellId);
     return EMPTY_STRING;

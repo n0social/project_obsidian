@@ -45,6 +45,13 @@ private:
 
     std::array<bool, NUM_MOUSE_BUTTONS> currentMouseState = {};
     std::array<bool, NUM_MOUSE_BUTTONS> previousMouseState = {};
+    // A tap on the tablet often presses and releases inside one long frame.
+    // Sampling the button only at frame start misses it, so the edges are
+    // latched from the events themselves.
+    std::array<bool, NUM_MOUSE_BUTTONS> pressedEvent_ = {};
+    std::array<bool, NUM_MOUSE_BUTTONS> releasedEvent_ = {};
+    std::array<bool, NUM_MOUSE_BUTTONS> edgePressed_ = {};
+    std::array<bool, NUM_MOUSE_BUTTONS> edgeReleased_ = {};
 
     glm::vec2 mousePosition = glm::vec2(0.0f);
     glm::vec2 previousMousePosition = glm::vec2(0.0f);

@@ -54,6 +54,37 @@ bool isBandageItem(const ItemQueryResponseData* info) {
            info->subClass == kConsumableSubclassBandage;
 }
 
+bool spellNameHas(const std::string& name, const char* token) {
+    return name.find(token) != std::string::npos;
+}
+
+bool spellNameStarts(const std::string& name, const char* prefix) {
+    const size_t n = std::char_traits<char>::length(prefix);
+    return name.size() >= n && name.compare(0, n, prefix) == 0;
+}
+
+// The 1.12 client builds the spellbook from spells the player knows, then
+// drops anything flagged hidden-clientside. Object casts such as Opening and
+// Grovel sometimes shipped without that bit; they are still not book entries.
+// SpellIcon 1 is the unset Temp portrait. Attack is the one book spell that
+// uses it, and the client draws the main-hand weapon in its place.
+bool spellShownInPlayerBook(uint32_t spellId, const std::string& name,
+                             uint32_t attributes, uint32_t iconId) {
+    constexpr uint32_t kHiddenClientside = 0x80u;
+    if (attributes & kHiddenClientside) return false;
+    if (name.empty()) return false;
+    if (spellNameHas(name, "(DND)") || spellNameHas(name, "(DNC)") ||
+        spellNameHas(name, "(TEST)") || spellNameHas(name, "(NYI)") ||
+        spellNameHas(name, "(OLD)") || spellNameHas(name, "zzOLD"))
+        return false;
+    if (name == "Generic" || name == "Grovel" || name == "Attacking" || name == "Duel")
+        return false;
+    if (spellNameStarts(name, "Opening") || spellNameStarts(name, "Closing"))
+        return false;
+    if (iconId == 1 && spellId != 6603) return false;
+    return true;
+}
+
 bool isBandageSpell(const GameHandler& owner, uint32_t spellId) {
     if (spellId == 0) return false;
     for (const auto& [itemId, info] : owner.getItemInfoCache()) {
@@ -1253,6 +1284,17 @@ const std::vector<SpellHandler::SpellBookTab>& SpellHandler::getSpellBookTabs() 
     std::vector<uint32_t> general;
 
     for (uint32_t spellId : knownSpells_) {
+        const std::string& spellName = owner_.getSpellName(spellId);
+        uint32_t attributes = 0;
+        uint32_t iconId = 0;
+        auto cacheIt = owner_.spellNameCacheRef().find(spellId);
+        if (cacheIt != owner_.spellNameCacheRef().end()) {
+            attributes = cacheIt->second.attributes;
+            iconId = cacheIt->second.iconId;
+        }
+        if (!spellShownInPlayerBook(spellId, spellName, attributes, iconId))
+            continue;
+
         auto slIt = owner_.spellToSkillLineRef().find(spellId);
         if (slIt != owner_.spellToSkillLineRef().end()) {
             uint32_t skillLineId = slIt->second;
@@ -1269,6 +1311,37 @@ const std::vector<SpellHandler::SpellBookTab>& SpellHandler::getSpellBookTabs() 
         return owner_.getSpellName(a) < owner_.getSpellName(b);
     };
 
+    auto keepHighestRank = [this](std::vector<uint32_t>& spells) {
+        // 1.12 shows one line per spell unless every rank is turned on.
+        // Listing each rank filled the book with the same icon twice and
+        // pushed the first page onto what reads as the second.
+        std::map<std::string, uint32_t> best;
+        std::map<std::string, int> bestRank;
+        std::vector<std::string> order;
+        for (uint32_t id : spells) {
+            std::string name = owner_.getSpellName(id);
+            if (name.empty()) name = std::to_string(id);
+            int rank = 0;
+            const std::string& rk = owner_.getSpellRank(id);
+            for (char c : rk) {
+                if (c >= '0' && c <= '9') rank = rank * 10 + (c - '0');
+            }
+            auto it = best.find(name);
+            if (it == best.end()) {
+                best.emplace(name, id);
+                bestRank.emplace(name, rank);
+                order.push_back(name);
+            } else if (rank >= bestRank[name]) {
+                it->second = id;
+                bestRank[name] = rank;
+            }
+        }
+        spells.clear();
+        spells.reserve(order.size());
+        for (const std::string& key : order) spells.push_back(best[key]);
+    };
+    keepHighestRank(general);
+
     if (!general.empty()) {
         std::sort(general.begin(), general.end(), byName);
         spellBookTabs_.push_back({"General", "Interface\\Icons\\INV_Misc_Book_09", std::move(general)});
@@ -1278,6 +1351,8 @@ const std::vector<SpellHandler::SpellBookTab>& SpellHandler::getSpellBookTabs() 
     for (auto& [skillLineId, spells] : bySkillLine) {
         auto nameIt = owner_.skillLineNamesRef().find(skillLineId);
         std::string tabName = (nameIt != owner_.skillLineNamesRef().end()) ? nameIt->second : "Unknown";
+        keepHighestRank(spells);
+        if (spells.empty()) continue;
         std::sort(spells.begin(), spells.end(), byName);
         named.emplace_back(std::move(tabName), std::move(spells));
     }
@@ -2842,6 +2917,16 @@ void SpellHandler::loadSpellNameCache() const {
             if (hasAttrExField) {
                 entry.attrEx = dbc->getUInt32(i, attrExField);
             }
+            // Vanilla Spell.dbc is 173 columns. Column 6 is Attributes. The
+            // layout key of that name points at Mechanic, so it is not used here.
+            if (fieldCount == 173) {
+                entry.attributes = dbc->getUInt32(i, 6);
+            }
+            if (spellL) {
+                uint32_t iconField = spellL->field("IconID");
+                if (iconField != 0xFFFFFFFF && iconField < fieldCount)
+                    entry.iconId = dbc->getUInt32(i, iconField);
+            }
             if (targetsField != 0xFFFFFFFF) {
                 entry.targetFlags = dbc->getUInt32(i, targetsField);
             }
@@ -3141,6 +3226,12 @@ const std::string& SpellHandler::getSpellRank(uint32_t spellId) const {
     loadSpellNameCache();
     auto it = owner_.spellNameCacheRef().find(spellId);
     return (it != owner_.spellNameCacheRef().end()) ? it->second.rank : SPELL_EMPTY_STRING;
+}
+
+uint32_t SpellHandler::getSpellAttributes(uint32_t spellId) const {
+    loadSpellNameCache();
+    auto it = owner_.spellNameCacheRef().find(spellId);
+    return (it != owner_.spellNameCacheRef().end()) ? it->second.attributes : 0;
 }
 
 const std::string& SpellHandler::getSpellDescription(uint32_t spellId) const {

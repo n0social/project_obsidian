@@ -507,12 +507,21 @@ void Minimap::render(VkCommandBuffer cmd, const Camera& playerCamera,
     VkDeviceSize offset = 0;
     vkCmdBindVertexBuffers(cmd, 0, 1, &quadVB, &offset);
 
-    // Position minimap in top-right corner
-    float margin = 10.0f;
-    float pixelW = static_cast<float>(mapSize) / screenWidth;
-    float pixelH = static_cast<float>(mapSize) / screenHeight;
-    float x = 1.0f - pixelW - margin / screenWidth;
-    float y = margin / screenHeight;  // top edge in Vulkan (y=0 is top)
+    // The 1.12 Minimap frame supplies a pixel rect (origin top-left). Otherwise
+    // the disc stays in the top-right corner.
+    float pixelW, pixelH, x, y;
+    if (displayRectSet_ && screenWidth > 0 && screenHeight > 0) {
+        pixelW = displayW_ / static_cast<float>(screenWidth);
+        pixelH = displayH_ / static_cast<float>(screenHeight);
+        x = displayX_ / static_cast<float>(screenWidth);
+        y = displayY_ / static_cast<float>(screenHeight);
+    } else {
+        float margin = 10.0f;
+        pixelW = static_cast<float>(mapSize) / screenWidth;
+        pixelH = static_cast<float>(mapSize) / screenHeight;
+        x = 1.0f - pixelW - margin / screenWidth;
+        y = margin / screenHeight;  // top edge in Vulkan (y=0 is top)
+    }
 
     // Compute player's UV in the composite texture
     constexpr float TILE_SIZE = core::coords::TILE_SIZE;
@@ -552,7 +561,8 @@ void Minimap::render(VkCommandBuffer cmd, const Camera& playerCamera,
     arrowRotation_ = arrowRotation;
     push.arrowRotation = arrowRotation;
     push.zoomRadius = zoomRadius;
-    push.squareShape = squareShape ? 1 : 0;
+    // The original border is round, so a frame-placed disc stays circular.
+    push.squareShape = (displayRectSet_ || !squareShape) ? 0 : 1;
     push.opacity = opacity_;
 
     vkCmdPushConstants(cmd, displayPipelineLayout,
@@ -560,6 +570,15 @@ void Minimap::render(VkCommandBuffer cmd, const Camera& playerCamera,
                        0, sizeof(push), &push);
 
     vkCmdDraw(cmd, 6, 1, 0, 0);
+}
+
+void Minimap::setZoomLevel(int zoom) {
+    if (zoom < 0) zoom = 0;
+    if (zoom > 4) zoom = 4;
+    zoomLevel_ = zoom;
+    // Step 2 is the radius the corner map has always used.
+    static const float kRadius[] = {800.0f, 600.0f, 400.0f, 250.0f, 140.0f};
+    viewRadius = kRadius[zoom];
 }
 
 } // namespace rendering

@@ -379,7 +379,37 @@ static int lua_GetContainerNumSlots(lua_State* L) {
     return 1;
 }
 
+// GetContainerItemCooldown(container, slot) → start, duration, enable
+// Bags call this for every filled slot. A missing function returns nothing,
+// and CooldownFrame_SetTimer then compares nil and the bag errors out.
+static int lua_GetContainerItemCooldown(lua_State* L) {
+    (void)L;
+    lua_pushnumber(L, 0);
+    lua_pushnumber(L, 0);
+    lua_pushnumber(L, 1);
+    return 3;
+}
+
+static int lua_GetBagName(lua_State* L) {
+    const int id = static_cast<int>(luaL_optnumber(L, 1, 0));
+    if (id == 0) { lua_pushstring(L, "Backpack"); return 1; }
+    if (id == -2) { lua_pushstring(L, "Keyring"); return 1; }
+    auto* gh = getGameHandler(L);
+    if (gh && id >= 1 && id <= 4) {
+        const auto slotKind = static_cast<game::EquipSlot>(18 + id);
+        const auto& slot = gh->getInventory().getEquipSlot(slotKind);
+        if (!slot.empty() && !slot.item.name.empty()) {
+            lua_pushstring(L, slot.item.name.c_str());
+            return 1;
+        }
+    }
+    lua_pushstring(L, "");
+    return 1;
+}
+
 // GetContainerItemInfo(container, slot) → texture, count, locked, quality, readable, lootable, link
+static void pushItemIcon(lua_State* L, game::GameHandler* gh, const game::ItemSlot& slot);
+
 static int lua_GetContainerItemInfo(lua_State* L) {
     auto* gh = getGameHandler(L);
     int container = static_cast<int>(luaL_checknumber(L, 1));
@@ -403,7 +433,7 @@ static int lua_GetContainerItemInfo(lua_State* L) {
     // Get item info for quality/icon
     const auto* info = gh->getItemInfo(itemSlot->item.itemId);
 
-    lua_pushnil(L);  // texture (icon path — would need ItemDisplayInfo icon resolver)
+    pushItemIcon(L, gh, *itemSlot);
     lua_pushnumber(L, itemSlot->item.stackCount);  // count
     lua_pushboolean(L, 0);  // locked
     lua_pushnumber(L, info ? info->quality : 0);  // quality
@@ -581,6 +611,17 @@ static int lua_GetInventoryItemID(lua_State* L) {
     return 1;
 }
 
+static void pushItemIcon(lua_State* L, game::GameHandler* gh, const game::ItemSlot& slot) {
+    uint32_t displayId = slot.item.displayInfoId;
+    if (displayId == 0) {
+        if (const auto* info = gh->getItemInfo(slot.item.itemId))
+            displayId = info->displayInfoId;
+    }
+    const std::string icon = displayId ? gh->getItemIconPath(displayId) : std::string{};
+    if (!icon.empty()) lua_pushstring(L, icon.c_str());
+    else lua_pushnil(L);
+}
+
 static int lua_GetInventoryItemTexture(lua_State* L) {
     auto* gh = getGameHandler(L);
     const char* uid = luaL_optstring(L, 1, "player");
@@ -593,6 +634,21 @@ static int lua_GetInventoryItemTexture(lua_State* L) {
     const auto& inv = gh->getInventory();
     const auto& slot = inv.getEquipSlot(static_cast<game::EquipSlot>(slotId - 1));
     if (slot.empty()) { return luaReturnNil(L); }
+    pushItemIcon(L, gh, slot);
+    return 1;
+}
+
+static int lua_GetInventoryItemCount(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    int slotId = static_cast<int>(luaL_optnumber(L, 2, 0));
+    if (!gh || slotId < 1 || slotId > 19) { lua_pushnumber(L, 0); return 1; }
+    const auto& slot = gh->getInventory().getEquipSlot(static_cast<game::EquipSlot>(slotId - 1));
+    lua_pushnumber(L, slot.empty() ? 0 : std::max(1u, slot.item.stackCount));
+    return 1;
+}
+
+static int lua_GetInventoryItemBroken(lua_State* L) {
+    (void)L;
     lua_pushnil(L);
     return 1;
 }
@@ -730,6 +786,8 @@ void registerInventoryLuaAPI(lua_State* L) {
                 {"GetItemCount",      lua_GetItemCount},
                 {"UseContainerItem",  lua_UseContainerItem},
                 {"GetContainerNumSlots",    lua_GetContainerNumSlots},
+                {"GetContainerItemCooldown", lua_GetContainerItemCooldown},
+                {"GetBagName",              lua_GetBagName},
                 {"GetContainerItemInfo",    lua_GetContainerItemInfo},
                 {"GetContainerItemLink",    lua_GetContainerItemLink},
                 {"GetContainerNumFreeSlots", lua_GetContainerNumFreeSlots},
@@ -737,6 +795,8 @@ void registerInventoryLuaAPI(lua_State* L) {
                 {"GetInventoryItemLink",    lua_GetInventoryItemLink},
                 {"GetInventoryItemID",      lua_GetInventoryItemID},
                 {"GetInventoryItemTexture", lua_GetInventoryItemTexture},
+                {"GetInventoryItemCount",   lua_GetInventoryItemCount},
+                {"GetInventoryItemBroken",  lua_GetInventoryItemBroken},
                 {"GetItemLink",          lua_GetItemLink},
                 {"GetNumLootItems",     lua_GetNumLootItems},
                 {"GetLootSlotInfo",     lua_GetLootSlotInfo},

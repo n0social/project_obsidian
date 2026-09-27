@@ -140,14 +140,25 @@ void GameScreen::renderMinimapMarkers(game::GameHandler& gameHandler) {
     auto* window = services_.window;
     if (!camera || !minimap || !window) return;
 
+    if (!minimap->isEnabled()) return;
+
     float screenW = static_cast<float>(window->getWidth());
 
-    // Minimap parameters (matching minimap.cpp)
-    float mapSize = 200.0f;
-    float margin = 10.0f;
-    float mapRadius = mapSize * 0.5f;
-    float centerX = screenW - margin - mapRadius;
-    float centerY = margin + mapRadius;
+    // Same rectangle the terrain disc uses, so quest and player dots stay on it.
+    float mapRadius, centerX, centerY;
+    if (minimap->hasDisplayRect()) {
+        float rx, ry, rw, rh;
+        minimap->getDisplayRect(rx, ry, rw, rh);
+        mapRadius = std::min(rw, rh) * 0.5f;
+        centerX = rx + rw * 0.5f;
+        centerY = ry + rh * 0.5f;
+    } else {
+        float mapSize = 200.0f;
+        float margin = 10.0f;
+        mapRadius = mapSize * 0.5f;
+        centerX = screenW - margin - mapRadius;
+        centerY = margin + mapRadius;
+    }
     float viewRadius = minimap->getViewRadius();
 
     // Use the exact same minimap center as Renderer::renderWorld() to keep markers anchored.
@@ -966,8 +977,11 @@ void GameScreen::renderMinimapMarkers(game::GameHandler& gameHandler) {
         }
     }
 
+    // The 1.12 MinimapCluster already draws the zone name, zoom buttons and clock.
+    const bool originalMinimap = minimap->hasDisplayRect();
+
     // Optional persistent coordinate display below the minimap.
-    if (settingsPanel_.showMinimapCoordinates_) {
+    if (settingsPanel_.showMinimapCoordinates_ && !originalMinimap) {
         glm::vec3 playerCanon = core::coords::renderToCanonical(playerRender);
         char coordBuf[32];
         std::snprintf(coordBuf, sizeof(coordBuf), "%.1f, %.1f", playerCanon.x, playerCanon.y);
@@ -1031,7 +1045,7 @@ void GameScreen::renderMinimapMarkers(game::GameHandler& gameHandler) {
         if (zoneName.empty() && renderer) {
             zoneName = renderer->getCurrentZoneName();
         }
-        if (!zoneName.empty()) {
+        if (!zoneName.empty() && !originalMinimap) {
             ImFont* font = ImGui::GetFont();
             float fontSize = ImGui::GetFontSize();
 
@@ -1073,7 +1087,7 @@ void GameScreen::renderMinimapMarkers(game::GameHandler& gameHandler) {
     }
 
     // Instance difficulty indicator — just below zone name, inside minimap top edge
-    if (gameHandler.isInInstance()) {
+    if (gameHandler.isInInstance() && !originalMinimap) {
         static constexpr const char* kDiffLabels[] = {"Normal", "Heroic", "25 Normal", "25 Heroic"};
         uint32_t diff = gameHandler.getInstanceDifficulty();
         const char* label = (diff < 4) ? kDiffLabels[diff] : "Unknown";
@@ -1294,7 +1308,8 @@ void GameScreen::renderMinimapMarkers(game::GameHandler& gameHandler) {
         ImGui::End();
     }
 
-    // Zoom buttons at the bottom edge of the minimap
+    // Zoom buttons at the bottom edge of the minimap. The original frame has its own.
+    if (!originalMinimap) {
     ImGui::SetNextWindowPos(ImVec2(centerX - 22, centerY + mapRadius - 30), ImGuiCond_Always);
     ImGui::SetNextWindowSize(ImVec2(44, 24), ImGuiCond_Always);
     ImGuiWindowFlags zoomFlags = ImGuiWindowFlags_NoTitleBar | ImGuiWindowFlags_NoResize |
@@ -1313,9 +1328,11 @@ void GameScreen::renderMinimapMarkers(game::GameHandler& gameHandler) {
         ImGui::PopStyleVar(2);
     }
     ImGui::End();
+    }
 
     // Optional clock display at bottom-right of minimap (local time).
-    if (settingsPanel_.showMinimapClock_) {
+    // GameTimeFrame is the clock when the original cluster is up.
+    if (settingsPanel_.showMinimapClock_ && !originalMinimap) {
         auto now = std::chrono::system_clock::now();
         auto tt  = std::chrono::system_clock::to_time_t(now);
         std::tm tmBuf{};

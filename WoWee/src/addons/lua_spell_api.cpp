@@ -465,12 +465,16 @@ static int lua_GetEnchantInfo(lua_State* L) {
     return 1;
 }
 
+static bool spellIdForBookSlot(game::GameHandler* gh, int slot, uint32_t& spellId);
+
 static int lua_GetSpellCooldown(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (!gh) { lua_pushnumber(L, 0); lua_pushnumber(L, 0); return 2; }
     // Accept spell name or ID
     uint32_t spellId = 0;
-    if (lua_isnumber(L, 1)) {
+    if (lua_isstring(L, 2)) {
+        spellIdForBookSlot(gh, static_cast<int>(luaL_optnumber(L, 1, 0)), spellId);
+    } else if (lua_isnumber(L, 1)) {
         spellId = static_cast<uint32_t>(lua_tonumber(L, 1));
     } else {
         const char* name = luaL_checkstring(L, 1);
@@ -695,13 +699,60 @@ static int lua_GetSpellInfo(lua_State* L) {
     return 7;
 }
 
+// 1.12 addresses the spellbook by slot: GetSpellName(id, "spell"), where id
+// is the book position from SpellBook_GetSpellID, not the spell's id.
+static bool spellIdForBookSlot(game::GameHandler* gh, int slot, uint32_t& spellId) {
+    if (!gh || slot < 1) return false;
+    int idx = slot;
+    for (const auto& tab : gh->getSpellBookTabs()) {
+        if (idx <= static_cast<int>(tab.spellIds.size())) {
+            spellId = tab.spellIds[idx - 1];
+            return spellId != 0;
+        }
+        idx -= static_cast<int>(tab.spellIds.size());
+    }
+    return false;
+}
+
+static int lua_GetSpellName(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    uint32_t spellId = 0;
+    if (!spellIdForBookSlot(gh, static_cast<int>(luaL_optnumber(L, 1, 0)), spellId))
+        return luaReturnNil(L);
+    const std::string& name = gh->getSpellName(spellId);
+    if (name.empty()) return luaReturnNil(L);
+    lua_pushstring(L, name.c_str());
+    lua_pushstring(L, gh->getSpellRank(spellId).c_str());
+    return 2;
+}
+
+static int lua_IsSpellPassive(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    uint32_t spellId = 0;
+    if (lua_isstring(L, 2)) {
+        if (!spellIdForBookSlot(gh, static_cast<int>(luaL_optnumber(L, 1, 0)), spellId)) {
+            lua_pushboolean(L, 0);
+            return 1;
+        }
+    } else if (lua_isnumber(L, 1)) {
+        spellId = static_cast<uint32_t>(lua_tonumber(L, 1));
+    }
+    constexpr uint32_t kPassive = 0x40u;
+    lua_pushboolean(L, gh && spellId != 0 && (gh->getSpellAttributes(spellId) & kPassive) != 0);
+    return 1;
+}
+
 // GetSpellTexture(spellIdOrName) -> icon texture path string
+// GetSpellTexture(bookSlot, "spell") is the 1.12 spellbook form.
 static int lua_GetSpellTexture(lua_State* L) {
     auto* gh = getGameHandler(L);
     if (!gh) { return luaReturnNil(L); }
 
     uint32_t spellId = 0;
-    if (lua_isnumber(L, 1)) {
+    if (lua_isstring(L, 2)) {
+        if (!spellIdForBookSlot(gh, static_cast<int>(luaL_optnumber(L, 1, 0)), spellId))
+            return luaReturnNil(L);
+    } else if (lua_isnumber(L, 1)) {
         spellId = static_cast<uint32_t>(lua_tonumber(L, 1));
     } else if (lua_isstring(L, 1)) {
         const char* name = lua_tostring(L, 1);
@@ -861,6 +912,8 @@ void registerSpellLuaAPI(lua_State* L) {
                 {"GetSpellDescription", lua_GetSpellDescription},
                 {"GetEnchantInfo",     lua_GetEnchantInfo},
                 {"GetSpellInfo",      lua_GetSpellInfo},
+                {"GetSpellName",      lua_GetSpellName},
+                {"IsSpellPassive",    lua_IsSpellPassive},
                 {"GetSpellTexture",   lua_GetSpellTexture},
                 {"GetSpellLink",         lua_GetSpellLink},
                 {"IsUsableSpell",        lua_IsUsableSpell},

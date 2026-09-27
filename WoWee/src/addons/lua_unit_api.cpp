@@ -1,6 +1,11 @@
 // lua_unit_api.cpp — Unit query, stats, party/raid, and player state Lua API bindings.
 // Extracted from lua_engine.cpp as part of §5.1 (Tame LuaEngine).
 #include "addons/lua_api_helpers.hpp"
+#include "pipeline/asset_manager.hpp"
+
+#include <string>
+#include <unordered_map>
+#include <utility>
 
 namespace wowee::addons {
 
@@ -564,6 +569,65 @@ static int lua_UnitOnTaxi(lua_State* L) {
     } else {
         lua_pushboolean(L, 0); // Can't determine for other units
     }
+    return 1;
+}
+
+// Race portrait for a creature display. Humanoid NPCs carry an extra-display
+// row (race and sex); everything else keeps the caller's fallback.
+static std::unordered_map<uint32_t, std::string> s_displayPortrait;
+static bool s_displayPortraitLoaded = false;
+
+static void loadDisplayPortraits(game::GameHandler* gh) {
+    if (s_displayPortraitLoaded || !gh) return;
+    auto* am = gh->services().assetManager;
+    if (!am || !am->isInitialized()) return;
+    s_displayPortraitLoaded = true;
+
+    std::unordered_map<uint32_t, std::pair<uint32_t, uint32_t>> extra;
+    if (auto dbc = am->loadDBC("CreatureDisplayInfoExtra.dbc");
+        dbc && dbc->isLoaded() && dbc->getFieldCount() > 2) {
+        for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
+            extra.emplace(dbc->getUInt32(i, 0),
+                          std::make_pair(dbc->getUInt32(i, 1), dbc->getUInt32(i, 2)));
+        }
+    }
+    static const char* kRaces[] = {
+        "", "Human", "Orc", "Dwarf", "NightElf", "Scourge", "Tauren", "Gnome", "Troll"
+    };
+    if (auto dbc = am->loadDBC("CreatureDisplayInfo.dbc");
+        dbc && dbc->isLoaded() && dbc->getFieldCount() > 3) {
+        for (uint32_t i = 0; i < dbc->getRecordCount(); ++i) {
+            const auto it = extra.find(dbc->getUInt32(i, 3));
+            if (it == extra.end()) continue;
+            const uint32_t race = it->second.first;
+            const uint32_t sex = it->second.second;
+            if (race < 1 || race > 8) continue;
+            std::string path = "Interface\\CharacterFrame\\TemporaryPortrait-";
+            path += (sex == 1) ? "Female-" : "Male-";
+            path += kRaces[race];
+            s_displayPortrait.emplace(dbc->getUInt32(i, 0), std::move(path));
+        }
+    }
+}
+
+static int lua_WoweeUnitPortrait(lua_State* L) {
+    auto* gh = getGameHandler(L);
+    if (!gh) return luaReturnNil(L);
+    std::string uid(luaL_optstring(L, 1, "target"));
+    toLowerInPlace(uid);
+    if (uid == "npc") uid = "target";
+    loadDisplayPortraits(gh);
+    const uint64_t guid = resolveUnitGuid(gh, uid);
+    if (guid == 0) return luaReturnNil(L);
+    auto entity = gh->getEntityManager().getEntity(guid);
+    if (!entity || !entity->isUnit()) return luaReturnNil(L);
+    auto* unit = static_cast<game::Unit*>(entity.get());
+    uint32_t display = unit->getDisplayId();
+    if (display == 0)
+        display = unit->getField(game::fieldIndex(game::UF::UNIT_FIELD_DISPLAYID));
+    auto it = s_displayPortrait.find(display);
+    if (it == s_displayPortrait.end()) return luaReturnNil(L);
+    lua_pushstring(L, it->second.c_str());
     return 1;
 }
 
@@ -1265,6 +1329,7 @@ static int lua_UnitIsConnected(lua_State* L) {
 void registerUnitLuaAPI(lua_State* L) {
     static const struct { const char* name; lua_CFunction func; } api[] = {
                 {"UnitName",      lua_UnitName},
+                {"UnitPVPName",   lua_UnitName},
                 {"UnitFullName",  lua_UnitName},
                 {"GetUnitName",   lua_UnitName},
                 {"UnitHealth",    lua_UnitHealth},
@@ -1471,6 +1536,7 @@ void registerUnitLuaAPI(lua_State* L) {
             return 0;
         }},
                 {"UnitRace",          lua_UnitRace},
+                {"WoweeUnitPortrait", lua_WoweeUnitPortrait},
                 {"UnitPowerType",     lua_UnitPowerType},
                 {"GetNumGroupMembers", lua_GetNumGroupMembers},
                 {"UnitGUID",          lua_UnitGUID},

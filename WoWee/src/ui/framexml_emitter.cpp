@@ -3,6 +3,7 @@
 #include "ui/xml_parser.hpp"
 
 #include <algorithm>
+#include <cctype>
 #include <sstream>
 
 namespace wowee {
@@ -18,7 +19,8 @@ bool isFrameElement(const std::string& n) {
         "Frame", "Button", "CheckButton", "StatusBar", "Slider", "EditBox",
         "ScrollFrame", "ScrollingMessageFrame", "MessageFrame", "SimpleHTML",
         "ColorSelect", "Model", "PlayerModel", "DressUpModel", "TabardModel",
-        "Cooldown", "GameTooltip", "MovieFrame", "ArchaeologyDigSiteFrame"
+        "Cooldown", "GameTooltip", "MovieFrame", "ArchaeologyDigSiteFrame",
+        "Minimap"
     };
     for (const char* f : kFrames) if (n == f) return true;
     return false;
@@ -38,6 +40,20 @@ std::string quote(const std::string& s) {
     }
     out += "\"";
     return out;
+}
+
+/// XML text="QUEST_LOG" is the global's value when that global is a string,
+/// which is how every panel title and button label is written. Quoting it
+/// leaves the word QUEST_LOG on the frame. A phrase that is not a name stays
+/// quoted, because it is already the text.
+std::string textExpr(const std::string& raw) {
+    if (raw.empty()) return quote(raw);
+    const bool ident = (std::isalpha(static_cast<unsigned char>(raw[0])) || raw[0] == '_') &&
+        std::all_of(raw.begin(), raw.end(), [](char c) {
+            return std::isalnum(static_cast<unsigned char>(c)) || c == '_';
+        });
+    if (!ident) return quote(raw);
+    return "(type(" + raw + ")==\"string\" and " + raw + " or " + quote(raw) + ")";
 }
 
 /// A <Size> or <Offset> can be written as a child <AbsDimension x= y=> or, in
@@ -222,11 +238,28 @@ struct Emitter {
 
         emitParentKey(node, var, parentVar);
 
+        // <NormalTexture inherits="UIPanelButtonUpTexture"/> carries its art on
+        // the virtual texture, not on this element. Without replaying that,
+        // a menu button is only its label.
+        if (isTexture) {
+            if (const std::string* inh = node.attr("inherits")) {
+                std::stringstream ss(*inh);
+                std::string one;
+                while (std::getline(ss, one, ',')) {
+                    one.erase(0, one.find_first_not_of(" \t"));
+                    one.erase(one.find_last_not_of(" \t") + 1);
+                    if (one.empty()) continue;
+                    line("if __WoweeTemplates[" + quote(one) + "] then __WoweeTemplates[" +
+                         quote(one) + "](" + var + ") end");
+                }
+            }
+        }
+
         if (const std::string* file = node.attr("file")) {
             line(var + ":SetTexture(" + quote(*file) + ")");
         }
         if (const std::string* text = node.attr("text")) {
-            line(var + ":SetText(" + quote(*text) + ")");
+            line(var + ":SetText(" + textExpr(*text) + ")");
         }
         if (const std::string* j = node.attr("justifyH")) {
             line(var + ":SetJustifyH(" + quote(*j) + ")");
@@ -338,6 +371,25 @@ struct Emitter {
             line(var + ":SetPoint(" + quote(point) + ", " + relative + ", " +
                  quote(relPoint) + ", " + std::to_string(ox) + ", " + std::to_string(oy) + ")");
         }
+    }
+
+    /// A virtual <Texture> is art another element inherits, the way a button's
+    /// face inherits UIPanelButtonUpTexture. It is not a widget of its own.
+    void emitVirtualTexture(const XmlNode& node) {
+        const std::string name = node.attrOr("name", "");
+        if (name.empty()) return;
+        line("__WoweeTemplates[" + quote(name) + "] = function(self)");
+        if (const std::string* file = node.attr("file"))
+            line("self:SetTexture(" + quote(*file) + ")");
+        if (const XmlNode* tc = node.child("TexCoords")) {
+            line("self:SetTexCoord(" + std::to_string(tc->attrFloat("left", 0.0f)) + ", " +
+                 std::to_string(tc->attrFloat("right", 1.0f)) + ", " +
+                 std::to_string(tc->attrFloat("top", 0.0f)) + ", " +
+                 std::to_string(tc->attrFloat("bottom", 1.0f)) + ")");
+        }
+        if (!node.child("Size") && !node.child("Anchors"))
+            line("if self.GetParent then self:SetAllPoints(self:GetParent()) end");
+        line("end");
     }
 
     /// Binds a region or frame to a named field on the frame containing it.
@@ -471,6 +523,9 @@ struct Emitter {
         // existed — which is what took down most of FrameXML.
         line(var + " = CreateFrame(" + quote(node.name) + ", " +
              nameArg(rawName, parentName, parentArg) + ", " + parentArg + ")");
+        // CreateFrame marks the frame loaded. This body still has to Hide it
+        // and run OnLoad, and that Hide is not the player closing the frame.
+        line(var + ".__loaded = nil");
 
         // Identity before anything is built on top of it. FrameXML makes names
         // out of the id — a party member's pet frame opens its OnLoad with
@@ -530,6 +585,34 @@ struct Emitter {
         }
         if (const std::string* o = node.attr("orientation")) {
             line(var + ":SetOrientation(" + quote(*o) + ")");
+        }
+        if (const XmlNode* backdrop = node.child("Backdrop")) {
+            const std::string bg = backdrop->attrOr("bgFile", "");
+            const std::string edge = backdrop->attrOr("edgeFile", "");
+            float tileSize = 16.0f, edgeSize = 16.0f;
+            if (const XmlNode* ts = backdrop->child("TileSize"))
+                if (const XmlNode* abs = ts->child("AbsValue"))
+                    tileSize = abs->attrFloat("val", tileSize);
+            if (const XmlNode* es = backdrop->child("EdgeSize"))
+                if (const XmlNode* abs = es->child("AbsValue"))
+                    edgeSize = abs->attrFloat("val", edgeSize);
+            float il = 0, ir = 0, it = 0, ib = 0;
+            if (const XmlNode* insets = backdrop->child("BackgroundInsets"))
+                if (const XmlNode* abs = insets->child("AbsInset")) {
+                    il = abs->attrFloat("left", 0);
+                    ir = abs->attrFloat("right", 0);
+                    it = abs->attrFloat("top", 0);
+                    ib = abs->attrFloat("bottom", 0);
+                }
+            line(var + ":SetBackdrop({ bgFile = " + quote(bg) +
+                 ", edgeFile = " + quote(edge) +
+                 ", tile = " + (backdrop->attrBool("tile") ? "true" : "false") +
+                 ", tileSize = " + std::to_string(tileSize) +
+                 ", edgeSize = " + std::to_string(edgeSize) +
+                 ", insets = { left = " + std::to_string(il) +
+                 ", right = " + std::to_string(ir) +
+                 ", top = " + std::to_string(it) +
+                 ", bottom = " + std::to_string(ib) + " } })");
         }
         if (node.attr("defaultValue")) {
             line(var + ":SetValue(" +
@@ -610,6 +693,17 @@ struct Emitter {
         // Before Frames and Scripts, so a child anchoring to $parentNormalTexture
         // and an OnLoad reading its own label both find something there.
         emitButtonRegions(node, var, name);
+        // <Button text="ABANDON_QUEST"> is the label. The template only creates
+        // an empty font string; without this the button stays blank.
+        if (const std::string* text = node.attr("text"); text && !text->empty()) {
+            line(var + ":SetText(" + textExpr(*text) + ")");
+        }
+        if (const XmlNode* normalFont = node.child("NormalFont")) {
+            if (const std::string* inh = normalFont->attr("inherits"); inh && !inh->empty()) {
+                line("if " + var + ".GetFontString then " + var +
+                     ":GetFontString():SetFontObject(" + quote(*inh) + ") end");
+            }
+        }
         // A StatusBar's fill. Without it every health, mana and XP bar in
         // FrameXML has a value and nothing to draw it with.
         if (const XmlNode* bar = node.child("BarTexture")) {
@@ -668,6 +762,10 @@ struct Emitter {
                  "local __ok, __e = pcall(__f, " + var + ") if not __ok then "
                  "__WoweeLogWarning(\"OnLoad \" .. tostring(" + var +
                  ":GetName()) .. \": \" .. tostring(__e)) end end end");
+            // Hide() above is the initial state, not a transition, so it must
+            // not run OnHide. Show/Hide consult this and only then run the
+            // handler, which is what fills the spellbook, quest log and bags.
+            line(var + ".__loaded = true");
         }
     }
 };
@@ -694,6 +792,8 @@ EmitResult emitFrameXml(const XmlNode& root) {
             if (const std::string* file = node.attr("file")) e.result.includeFiles.push_back(*file);
         } else if (node.name == "Font") {
             e.emitFont(node);
+        } else if (node.name == "Texture" && node.attrBool("virtual")) {
+            e.emitVirtualTexture(node);
         } else if (isFrameElement(node.name)) {
             e.emitFrame(node, "", "");
         }
